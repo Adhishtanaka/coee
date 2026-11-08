@@ -33,6 +33,9 @@ async function closePreviews() {
  */
 export async function addCode(root: vscode.Uri, sn: Snippet, label = "the suggested code"): Promise<boolean> {
 	const uri = vscode.Uri.joinPath(root, sn.file);
+	// Whatever the model wrote, coee only ever writes inside the project.
+	const rel = path.relative(root.fsPath, uri.fsPath);
+	if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { vscode.window.showWarningMessage(`coee: ${sn.file} is outside this project, so coee won't write it.`); return false; }
 	const before = await fileText(uri);
 	const p = placeSnippet(before, sn);
 	if (p.status === 'added') { vscode.window.showInformationMessage(`coee: this code is already in ${sn.file}.`); return false; }

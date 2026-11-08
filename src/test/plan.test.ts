@@ -1,7 +1,7 @@
 // Replays of plan replies against real file text: does the code land where it should, and only once?
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Snippet, applyPlacement, placeSnippet, repairPlan } from '../prompt';
+import { Snippet, applyPlacement, placeSnippet, repairPlan, repairSnippets, safeNewPath } from '../prompt';
 
 const SERVER = [
 	"const http = require('http');",
@@ -80,4 +80,11 @@ test('new files: created when missing, never overwritten, recognised when alread
 test('an empty "after" puts code at the top; a lone brace never counts as already added', () => {
 	assert.ok(add(SERVER, { file: 'server.js', mode: 'insert', after: '', code: "'use strict';" }).startsWith("'use strict';\nconst http"));
 	assert.equal(placeSnippet(SERVER, { file: 'server.js', mode: 'insert', after: "const store = require('./store');", code: '}' }).status, 'ready');
+});
+
+test('new-file paths from the model stay inside the project, on any platform', () => {
+	for (const bad of ['../x.js', 'a/../../x.js', '..\\x.js', 'a\\..\\..\\x.js', '/etc/x', 'C:\\x.js', 'c:/x.js', '\\\\server\\share\\x', '//server/x', '']) assert.equal(safeNewPath(bad), undefined, bad);
+	assert.equal(safeNewPath('./test\\app.test.js'), 'test/app.test.js');
+	assert.equal(safeNewPath('src/./a.ts'), 'src/a.ts');
+	assert.deepEqual(repairSnippets([{ file: '..\\..\\evil.js', mode: 'new', code: 'x' }], []), []);
 });

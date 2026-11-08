@@ -634,8 +634,8 @@ export function repairSnippets(raw: unknown, known: readonly string[]): Snippet[
 	for (const x of Array.isArray(raw) ? raw : []) {
 		const code = text(x?.code, 8000);
 		const mode = x?.mode === 'replace' || x?.mode === 'new' ? x.mode : 'insert';
-		const given = str(x?.file, 300).replace(/^\.\//, '');
-		const file = mode === 'new' ? (given && !given.startsWith('/') && !given.split('/').includes('..') ? given : undefined) : resolvePath(given, known);
+		const given = str(x?.file, 300).replace(/\\/g, '/').replace(/^\.\//, '');
+		const file = mode === 'new' ? safeNewPath(given) : resolvePath(given, known);
 		if (!code || !file) continue;
 		const sn: Snippet = { file, mode, code };
 		if (mode === 'insert') {
@@ -651,6 +651,14 @@ export function repairSnippets(raw: unknown, known: readonly string[]): Snippet[
 		out.push(sn);
 	}
 	return out.slice(0, 4);
+}
+
+/** A new file's path from the model, if it stays inside the project: relative, no "..", no drive letter or UNC prefix. */
+export function safeNewPath(p: string): string | undefined {
+	const q = p.replace(/\\/g, '/');
+	const parts = q.split('/').filter(x => x && x !== '.');
+	if (!parts.length || /^([a-z]:|\/)/i.test(q) || parts.some(x => x === '..' || /^[a-z]:$/i.test(x))) return undefined;
+	return parts.join('/');
 }
 
 /** Lines with their spacing ignored, so a snippet still matches after reformatting. Blank lines don't count. */
