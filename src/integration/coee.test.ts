@@ -127,6 +127,9 @@ suite('coee in VS Code', () => {
 		try {
 			assert.equal(await insideRoot(root(), file('linked/x.js')), false);
 			assert.equal(await insideRoot(root(), file('newdir/x.js')), true);
+			nodefs.symlinkSync(path.join(outside, 'missing.js'), path.join(root().fsPath, 'dangling.js')); // points at nothing yet
+			assert.equal(await insideRoot(root(), file('dangling.js')), false, 'a dangling link is refused');
+			nodefs.unlinkSync(path.join(root().fsPath, 'dangling.js'));
 			const ok = await answering('showInformationMessage', () => 'Add', () => addCode(root(), { file: 'linked/x.js', mode: 'new', code: 'x()' }));
 			assert.equal(ok, false);
 			assert.ok(!nodefs.existsSync(path.join(outside, 'x.js')));

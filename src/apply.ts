@@ -18,13 +18,18 @@ export async function fileText(uri: vscode.Uri): Promise<string | undefined> {
 export async function insideRoot(root: vscode.Uri, uri: vscode.Uri): Promise<boolean> {
 	if (root.scheme !== 'file' || uri.scheme !== 'file') return uri.path.startsWith(root.path.replace(/\/?$/, '/'));
 	const real = async (p: string): Promise<string> => {
-		try { return await fs.realpath(p); } catch {
+		try { return await fs.realpath(p); } catch (err) {
+			// Only a path that truly doesn't exist is resolved through its parent. Something that exists but can't be
+			// resolved is a dangling or looping symlink: writing there would follow it, so refuse.
+			if ((err as NodeJS.ErrnoException).code !== 'ENOENT' || await fs.lstat(p).then(() => true, () => false)) throw new Error('unresolvable link');
 			const parent = path.dirname(p);
 			return parent === p ? p : path.join(await real(parent), path.basename(p));
 		}
 	};
-	const rel = path.relative(await real(root.fsPath), await real(uri.fsPath));
-	return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+	try {
+		const rel = path.relative(await real(root.fsPath), await real(uri.fsPath));
+		return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+	} catch { return false; }
 }
 
 const previews = new Map<string, string>();
@@ -68,6 +73,8 @@ export async function addCode(root: vscode.Uri, sn: Snippet, label = "the sugges
 	const now = await fileText(uri);
 	const q = now === before ? p : placeSnippet(now, sn);
 	if (q.status !== 'ready') { vscode.window.showWarningMessage(`coee: ${q.status === 'added' ? `the code is already in ${sn.file}.` : q.reason}`); return false; }
+	// Checked again now: the folder may have changed while the preview was open.
+	if (!await insideRoot(root, uri)) { vscode.window.showWarningMessage(`coee: ${sn.file} is outside this project, so coee won't write it.`); return false; }
 	const problems = () => vscode.languages.getDiagnostics(uri).filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
 	const errorsBefore = problems();
 	const edit = new vscode.WorkspaceEdit();
