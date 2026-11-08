@@ -83,7 +83,8 @@ function md(text) {
 }
 
 // The switcher between coee's pages; the extension opens the page (for the same project) when one is picked.
-const PAGES = [['architecture', 'Architecture'], ['changes', 'Changes'], ['security', 'Security'], ['plan', 'Plan'], ['walkthrough', 'Walkthrough']];
+// In the order work happens: understand it, learn a part, plan a change, review it, check it's safe.
+const PAGES = [['architecture', 'Architecture'], ['walkthrough', 'Walkthrough'], ['plan', 'Plan'], ['changes', 'Changes'], ['security', 'Security']];
 function coeeNav(current) {
   return el('nav', { className: 'coeenav', 'aria-label': 'coee pages' }, ...PAGES.map(([id, label]) =>
     el('button', { 'aria-current': id === current ? 'page' : null, onclick: () => id !== current && vscode.postMessage({ type: 'nav', to: id }) }, label)));

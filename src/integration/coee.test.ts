@@ -74,7 +74,7 @@ suiteTeardown(() => {
 suite('coee in VS Code', () => {
 	test('commands: the new ones exist, the removed ones are gone', async () => {
 		const all = await vscode.commands.getCommands(true);
-		for (const c of ['coee.architecture', 'coee.changes', 'coee.security', 'coee.plan', 'coee.go', 'coee.exportSarif', 'coee.walkPart']) assert.ok(all.includes(c), c);
+		for (const c of ['coee.architecture', 'coee.changes', 'coee.security', 'coee.plan', 'coee.go', 'coee.exportSarif', 'coee.walkPart', 'coee.reviewProject', 'coee.reviewFile']) assert.ok(all.includes(c), c);
 		for (const c of ['coee.map', 'coee.review', 'coee.reviewStaged']) assert.ok(!all.includes(c), `${c} should be gone`);
 	});
 

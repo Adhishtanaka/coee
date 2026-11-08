@@ -186,13 +186,27 @@
         "title": "Architecture overview",
         "category": "coee",
         "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "coee.reviewProject",
+        "title": "coee review: project",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "coee.reviewFile",
+        "title": "coee review: file",
+        "icon": "$(book)"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "submenu": "coee.editor",
+          "command": "coee.reviewProject",
           "group": "1_coee@1"
+        },
+        {
+          "command": "coee.reviewFile",
+          "group": "1_coee@2"
         }
       ],
       "commandPalette": [
@@ -247,12 +261,25 @@
         {
           "command": "coee.explainFile",
           "when": "editorIsOpen"
+        },
+        {
+          "command": "coee.reviewProject",
+          "when": "false"
+        },
+        {
+          "command": "coee.reviewFile",
+          "when": "false"
         }
       ],
       "explorer/context": [
         {
-          "submenu": "coee.explorer",
+          "command": "coee.reviewProject",
           "group": "1_coee@1"
+        },
+        {
+          "command": "coee.reviewFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "1_coee@2"
         }
       ],
       "editor/title": [
@@ -260,41 +287,6 @@
           "command": "coee.explainFile",
           "when": "resourceScheme == file || resourceScheme == untitled",
           "group": "navigation@90"
-        }
-      ],
-      "coee.editor": [
-        {
-          "command": "coee.architecture",
-          "group": "1_hub@1"
-        },
-        {
-          "command": "coee.explain",
-          "when": "editorHasSelection",
-          "group": "2_code@1"
-        },
-        {
-          "command": "coee.explainFile",
-          "group": "2_code@2"
-        },
-        {
-          "command": "coee.ask",
-          "group": "2_code@3"
-        }
-      ],
-      "coee.explorer": [
-        {
-          "command": "coee.architecture",
-          "group": "1_hub@1"
-        },
-        {
-          "command": "coee.explainResource",
-          "when": "explorerResourceIsFolder",
-          "group": "2_code@1"
-        },
-        {
-          "command": "coee.explainFile",
-          "when": "!explorerResourceIsFolder",
-          "group": "2_code@1"
         }
       ],
       "scm/title": [
@@ -412,16 +404,6 @@
           "highContrast": "#4F9CF9",
           "highContrastLight": "#1F4FA0"
         }
-      }
-    ],
-    "submenus": [
-      {
-        "id": "coee.editor",
-        "label": "coee"
-      },
-      {
-        "id": "coee.explorer",
-        "label": "coee"
       }
     ]
   }

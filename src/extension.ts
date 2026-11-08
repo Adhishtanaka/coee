@@ -73,6 +73,9 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!target) return vscode.window.showInformationMessage('coee: open a file first, then explain it.');
 			return walkthrough.explainResource(target).catch(err => walkthrough.fail(err));
 		}),
+		// The two right-click entries: the project's architecture hub, and a walkthrough of one file.
+		vscode.commands.registerCommand('coee.reviewProject', (arg?: unknown) => vscode.commands.executeCommand('coee.architecture', arg)),
+		vscode.commands.registerCommand('coee.reviewFile', (uri?: vscode.Uri) => vscode.commands.executeCommand('coee.explainFile', uri)),
 		vscode.commands.registerCommand('coee.explain', withEditor(e => walkthrough.explainEditor(e))),
 		vscode.commands.registerCommand('coee.explainResource', (uri?: vscode.Uri) => {
 			const target = uri ?? vscode.window.activeTextEditor?.document.uri;
@@ -112,7 +115,7 @@ export function activate(context: vscode.ExtensionContext) {
 				case 'changes': return vscode.commands.executeCommand('coee.changes', r);
 				case 'security': return security.open(r);
 				case 'plan': return walkthrough.openPlan(r);
-				case 'walkthrough': if (!walkthrough.show()) vscode.window.showInformationMessage('coee: no walkthrough yet. Click Explain above a function, or Walk me through on the architecture page.'); return;
+				case 'walkthrough': return walkthrough.openWalkthrough(r);
 			}
 		})),
 		vscode.commands.registerCommand('coee.exportSarif', () => security.exportSarif()),
