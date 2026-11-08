@@ -4,7 +4,8 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import { FakeModel } from './fake';
-import { addCode } from '../apply';
+import { addCode, insideRoot } from '../apply';
+import * as nodefs from 'fs';
 import { showLines } from '../ui';
 
 const root = () => vscode.workspace.workspaceFolders![0].uri;
@@ -118,6 +119,20 @@ suite('coee in VS Code', () => {
 		const ok = await answering('showInformationMessage', () => 'Add', () => addCode(root(), { file: 'server.js', mode: 'replace', find: 'const nothing = here;', code: 'x()' }));
 		assert.equal(ok, false);
 		assert.equal(await text('server.js'), before);
+	});
+
+	test('adding code: never through a symlink that leads outside the project', async () => {
+		const outside = nodefs.mkdtempSync(path.join(os.tmpdir(), 'coee-outside-'));
+		nodefs.symlinkSync(outside, path.join(root().fsPath, 'linked'));
+		try {
+			assert.equal(await insideRoot(root(), file('linked/x.js')), false);
+			assert.equal(await insideRoot(root(), file('newdir/x.js')), true);
+			const ok = await answering('showInformationMessage', () => 'Add', () => addCode(root(), { file: 'linked/x.js', mode: 'new', code: 'x()' }));
+			assert.equal(ok, false);
+			assert.ok(!nodefs.existsSync(path.join(outside, 'x.js')));
+		} finally {
+			nodefs.unlinkSync(path.join(root().fsPath, 'linked'));
+		}
 	});
 
 	test('changes: saving an edit gets it reviewed without a click, on the changed line, with its suggestion as a quick fix', async () => {

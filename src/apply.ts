@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { promises as fs } from 'fs';
 import { Snippet, applyPlacement, placeSnippet } from './prompt';
 import { codeColumn } from './ui';
 
@@ -8,6 +9,22 @@ export async function fileText(uri: vscode.Uri): Promise<string | undefined> {
 	const open = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
 	if (open) return open.getText();
 	try { return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)); } catch { return undefined; }
+}
+
+/**
+ * Whether `uri` is inside `root` on disk: symlinks resolved, so a linked folder can't lead a write elsewhere.
+ * The deepest part of the path that exists is resolved (a new file doesn't exist yet), then the rest is added back.
+ */
+export async function insideRoot(root: vscode.Uri, uri: vscode.Uri): Promise<boolean> {
+	if (root.scheme !== 'file' || uri.scheme !== 'file') return uri.path.startsWith(root.path.replace(/\/?$/, '/'));
+	const real = async (p: string): Promise<string> => {
+		try { return await fs.realpath(p); } catch {
+			const parent = path.dirname(p);
+			return parent === p ? p : path.join(await real(parent), path.basename(p));
+		}
+	};
+	const rel = path.relative(await real(root.fsPath), await real(uri.fsPath));
+	return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
 const previews = new Map<string, string>();
@@ -34,8 +51,7 @@ async function closePreviews() {
 export async function addCode(root: vscode.Uri, sn: Snippet, label = "the suggested code"): Promise<boolean> {
 	const uri = vscode.Uri.joinPath(root, sn.file);
 	// Whatever the model wrote, coee only ever writes inside the project.
-	const rel = path.relative(root.fsPath, uri.fsPath);
-	if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { vscode.window.showWarningMessage(`coee: ${sn.file} is outside this project, so coee won't write it.`); return false; }
+	if (!await insideRoot(root, uri)) { vscode.window.showWarningMessage(`coee: ${sn.file} is outside this project, so coee won't write it.`); return false; }
 	const before = await fileText(uri);
 	const p = placeSnippet(before, sn);
 	if (p.status === 'added') { vscode.window.showInformationMessage(`coee: this code is already in ${sn.file}.`); return false; }
