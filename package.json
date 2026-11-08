@@ -1,0 +1,402 @@
+{
+  "name": "coee",
+  "displayName": "coee",
+  "description": "Understand any codebase in VS Code: step-by-step walkthroughs beside the code, an architecture overview with diagrams, a system map, change reviews and change planning. Explains only; never edits.",
+  "version": "1.0.0",
+  "publisher": "coee",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#FFFFFF",
+    "theme": "light"
+  },
+  "keywords": [
+    "explain",
+    "code explanation",
+    "walkthrough",
+    "system map",
+    "architecture",
+    "learning",
+    "copilot"
+  ],
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Education",
+    "AI",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test \"out/test/*.test.js\"",
+    "package": "npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "~1.95.0",
+    "typescript": "^5.6.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "coee.explain",
+        "title": "Explain these lines",
+        "category": "coee",
+        "icon": "$(book)"
+      },
+      {
+        "command": "coee.explainFile",
+        "title": "Explain this file",
+        "category": "coee",
+        "icon": "$(book)"
+      },
+      {
+        "command": "coee.explainResource",
+        "title": "Explain this folder",
+        "category": "coee",
+        "icon": "$(compass)"
+      },
+      {
+        "command": "coee.tour",
+        "title": "Explain this project",
+        "category": "coee",
+        "icon": "$(compass)"
+      },
+      {
+        "command": "coee.plan",
+        "title": "Plan a change…",
+        "category": "coee",
+        "icon": "$(lightbulb)"
+      },
+      {
+        "command": "coee.ask",
+        "title": "Ask about this code…",
+        "category": "coee",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "coee.map",
+        "title": "Open system map",
+        "category": "coee",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "coee.prev",
+        "title": "Previous step",
+        "category": "coee",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "coee.next",
+        "title": "Next step",
+        "category": "coee",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "coee.more",
+        "title": "More detail on this step",
+        "category": "coee",
+        "icon": "$(unfold)"
+      },
+      {
+        "command": "coee.close",
+        "title": "Close walkthrough",
+        "category": "coee",
+        "icon": "$(close)"
+      },
+      {
+        "command": "coee.cancel",
+        "title": "Stop explaining",
+        "category": "coee"
+      },
+      {
+        "command": "coee.explainLines",
+        "title": "Explain these lines",
+        "category": "coee"
+      },
+      {
+        "command": "coee.recent",
+        "title": "Reopen a recent walkthrough",
+        "category": "coee",
+        "icon": "$(history)"
+      },
+      {
+        "command": "coee.clearCache",
+        "title": "Clear cache",
+        "category": "coee",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "coee.review",
+        "title": "Review changes…",
+        "category": "coee",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "coee.reviewStaged",
+        "title": "Review before commit",
+        "category": "coee",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "coee.reviewCommit",
+        "title": "Explain a commit…",
+        "category": "coee",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "coee.architecture",
+        "title": "Architecture overview",
+        "category": "coee",
+        "icon": "$(symbol-structure)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "submenu": "coee.editor",
+          "group": "1_coee@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "coee.explain",
+          "when": "editorIsOpen"
+        },
+        {
+          "command": "coee.ask",
+          "when": "editorIsOpen"
+        },
+        {
+          "command": "coee.prev",
+          "when": "coee.active"
+        },
+        {
+          "command": "coee.next",
+          "when": "coee.active"
+        },
+        {
+          "command": "coee.more",
+          "when": "coee.active"
+        },
+        {
+          "command": "coee.close",
+          "when": "coee.active"
+        },
+        {
+          "command": "coee.explainResource",
+          "when": "false"
+        },
+        {
+          "command": "coee.tour",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "coee.explainLines",
+          "when": "false"
+        },
+        {
+          "command": "coee.explainFile",
+          "when": "editorIsOpen"
+        }
+      ],
+      "explorer/context": [
+        {
+          "submenu": "coee.explorer",
+          "group": "1_coee@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "coee.explainFile",
+          "when": "resourceScheme == file || resourceScheme == untitled",
+          "group": "navigation@90"
+        }
+      ],
+      "coee.editor": [
+        {
+          "command": "coee.explain",
+          "when": "editorHasSelection",
+          "group": "1_code@1"
+        },
+        {
+          "command": "coee.explainFile",
+          "group": "1_code@2"
+        },
+        {
+          "command": "coee.ask",
+          "group": "1_code@3"
+        },
+        {
+          "command": "coee.architecture",
+          "group": "2_project@1"
+        },
+        {
+          "command": "coee.tour",
+          "group": "2_project@2"
+        },
+        {
+          "command": "coee.plan",
+          "group": "2_project@3"
+        },
+        {
+          "command": "coee.map",
+          "group": "2_project@4"
+        },
+        {
+          "command": "coee.review",
+          "group": "3_changes@1"
+        },
+        {
+          "command": "coee.reviewStaged",
+          "group": "3_changes@2"
+        },
+        {
+          "command": "coee.recent",
+          "group": "4_more@1"
+        }
+      ],
+      "coee.explorer": [
+        {
+          "command": "coee.explainFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "1_explain@1"
+        },
+        {
+          "command": "coee.explainResource",
+          "when": "explorerResourceIsFolder",
+          "group": "1_explain@1"
+        },
+        {
+          "command": "coee.architecture",
+          "when": "explorerResourceIsFolder",
+          "group": "1_explain@2"
+        },
+        {
+          "command": "coee.plan",
+          "when": "explorerResourceIsFolder",
+          "group": "2_project@1"
+        },
+        {
+          "command": "coee.map",
+          "when": "explorerResourceIsFolder",
+          "group": "2_project@2"
+        },
+        {
+          "command": "coee.review",
+          "when": "explorerResourceIsFolder",
+          "group": "3_changes@1"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "coee.reviewStaged",
+          "when": "scmProvider == git",
+          "group": "navigation@90"
+        },
+        {
+          "command": "coee.review",
+          "when": "scmProvider == git",
+          "group": "navigation@91"
+        },
+        {
+          "command": "coee.reviewCommit",
+          "when": "scmProvider == git",
+          "group": "1_coee@1"
+        }
+      ],
+      "scm/historyItem/context": [
+        {
+          "command": "coee.reviewCommit",
+          "group": "1_coee@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "coee.explain",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "coee.next",
+        "key": "alt+]",
+        "when": "coee.active"
+      },
+      {
+        "command": "coee.prev",
+        "key": "alt+[",
+        "when": "coee.active"
+      }
+    ],
+    "configuration": {
+      "title": "coee",
+      "properties": {
+        "coee.modelFamily": {
+          "type": "string",
+          "default": "",
+          "order": 2,
+          "markdownDescription": "Preferred chat model family (e.g. `gpt-4o`, `claude-sonnet-4`). Empty uses the first available model."
+        },
+        "coee.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "order": 0,
+          "description": "Show an Explain link above each function, method and class."
+        },
+        "coee.cache": {
+          "type": "boolean",
+          "default": true,
+          "order": 3,
+          "markdownDescription": "Keep finished walkthroughs, so reopening one is instant. Any edit to the code gets a fresh explanation anyway.\n\n[Clear coee's cache](command:coee.clearCache) removes saved walkthroughs, the recent list and saved system maps."
+        }
+      }
+    },
+    "colors": [
+      {
+        "id": "coee.highlightBackground",
+        "description": "Background of the lines coee is explaining.",
+        "defaults": {
+          "dark": "#4F9CF91F",
+          "light": "#2F6FD226",
+          "highContrast": "#4F9CF933",
+          "highContrastLight": "#2F6FD233"
+        }
+      },
+      {
+        "id": "coee.highlightBorder",
+        "description": "Marker beside the lines coee is explaining, and its accents.",
+        "defaults": {
+          "dark": "#4F9CF9",
+          "light": "#2F6FD2",
+          "highContrast": "#4F9CF9",
+          "highContrastLight": "#1F4FA0"
+        }
+      }
+    ],
+    "submenus": [
+      {
+        "id": "coee.editor",
+        "label": "coee"
+      },
+      {
+        "id": "coee.explorer",
+        "label": "coee"
+      }
+    ]
+  }
+}
