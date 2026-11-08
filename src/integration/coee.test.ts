@@ -15,6 +15,16 @@ async function until<T>(what: string, get: () => T | undefined | false, ms = 20_
 	for (const end = Date.now() + ms; Date.now() < end; await sleep(200)) { const v = get(); if (v) return v; }
 	throw new Error(`timed out waiting for ${what}`);
 }
+/** Code actions at a range. VS Code cancels the query if the editor changes meanwhile (a page opening, diagnostics
+ * republished), so it is asked again until it answers. */
+async function codeActions(uri: vscode.Uri, range: vscode.Range): Promise<vscode.CodeAction[]> {
+	for (let attempt = 0; ; attempt++) {
+		try { return await vscode.commands.executeCommand<vscode.CodeAction[]>('vscode.executeCodeActionProvider', uri, range); } catch (err) {
+			if (attempt >= 5 || !/Canceled/.test(String(err))) throw err;
+			await sleep(300);
+		}
+	}
+}
 const text = async (p: string) => (await vscode.workspace.openTextDocument(file(p))).getText();
 /** Groups holding a coee page (a webview tab). */
 const coeeGroups = () => vscode.window.tabGroups.all.filter(g => g.tabs.some(t => t.input instanceof vscode.TabInputWebview));
@@ -89,7 +99,7 @@ suite('coee in VS Code', () => {
 		const diags = await until('security diagnostics', () => { const d = vscode.languages.getDiagnostics(file('files.js')).filter(x => x.source === 'coee security'); return d.length >= 4 && d; });
 		const cwes = new Set(diags.map(d => typeof d.code === 'object' ? String(d.code.value) : String(d.code)));
 		for (const cwe of ['CWE-22', 'CWE-78', 'CWE-95', 'CWE-79']) assert.ok(cwes.has(cwe), `missing ${cwe}: ${[...cwes]}`);
-		const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>('vscode.executeCodeActionProvider', file('files.js'), diags[0].range);
+		const actions = await codeActions(file('files.js'), diags[0].range);
 		assert.ok(actions.some(a => a.title === 'coee: explain this finding'));
 	});
 
@@ -154,7 +164,7 @@ suite('coee in VS Code', () => {
 		const d = await until('a review diagnostic', () => vscode.languages.getDiagnostics(doc.uri).find(x => x.source === 'coee review'));
 		assert.match(d.message, /Cache never expires/);
 		assert.equal(d.range.start.line, 2);
-		const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>('vscode.executeCodeActionProvider', doc.uri, d.range);
+		const actions = await codeActions(doc.uri, d.range);
 		assert.ok(actions.some(a => a.title === 'coee: apply the suggested change…'));
 		// The same diff isn't reviewed twice: saving again without changes costs no request.
 		const n = model.count(/reviewing a colleague's change/);
