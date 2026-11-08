@@ -1,8 +1,12 @@
 import * as vscode from 'vscode';
 import { log } from './lm';
 import { MapController } from './map';
+import { watchEditors } from './ui';
+import { registerPreviews } from './apply';
+import { SecurityController } from './security';
+import { ChangesController } from './changes';
 import { ArchitectureController } from './architecture';
-import { WalkthroughController, symbolsOf } from './walkthrough';
+import { TourPart, WalkthroughController, symbolsOf } from './walkthrough';
 import { commit, repoRoot } from './git';
 
 const LENS_KINDS = [vscode.SymbolKind.Function, vscode.SymbolKind.Method, vscode.SymbolKind.Class, vscode.SymbolKind.Constructor, vscode.SymbolKind.Interface, vscode.SymbolKind.Struct, vscode.SymbolKind.Enum];
@@ -37,6 +41,12 @@ export function activate(context: vscode.ExtensionContext) {
 	const map = new MapController(context);
 	const walkthrough = new WalkthroughController(context.extensionUri, map, context.workspaceState);
 	const architecture = new ArchitectureController(context, map);
+	const security = new SecurityController(context);
+	context.subscriptions.push(security);
+	walkthrough.onStep = (file, line) => architecture.follow(file, line);
+	const changes = new ChangesController(context, t => walkthrough.review(undefined, undefined, t).catch(err => walkthrough.fail(err)));
+	context.subscriptions.push(changes);
+	void changes.start();
 
 	const withEditor = (fn: (e: vscode.TextEditor) => Promise<unknown>) => async () => {
 		const editor = vscode.window.activeTextEditor;
@@ -53,7 +63,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const lens = new ExplainLens();
 	const activeUri = () => vscode.window.activeTextEditor?.document.uri ?? vscode.window.visibleTextEditors[0]?.document.uri;
 
-	context.subscriptions.push(
+	context.subscriptions.push(watchEditors(), registerPreviews(),
 		log, walkthrough, map, architecture,
 		vscode.languages.registerCodeLensProvider([{ scheme: 'file' }, { scheme: 'untitled' }], lens),
 		vscode.workspace.onDidChangeConfiguration(e => { if (e.affectsConfiguration('coee.codeLens')) lens.refresh(); }),
@@ -75,15 +85,15 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('coee.more', () => walkthrough.more().catch(err => walkthrough.fail(err))),
 		vscode.commands.registerCommand('coee.close', () => walkthrough.close()),
 		vscode.commands.registerCommand('coee.cancel', () => walkthrough.cancel()),
-		vscode.commands.registerCommand('coee.map', safe(async (uri?: unknown, select?: unknown) => map.open(await folderOf(uri), typeof select === 'string' ? select : undefined))),
+		vscode.commands.registerCommand('coee.security', safe(async (arg?: unknown) => security.open(arg instanceof vscode.Uri ? arg : undefined))),
 		vscode.commands.registerCommand('coee.clearCache', async () => {
-			const n = await walkthrough.clearCache() + await map.clearCache() + await architecture.clearCache();
+			const n = await walkthrough.clearCache() + await map.clearCache() + await architecture.clearCache() + await security.clearCache();
 			vscode.window.showInformationMessage(n ? `coee: cache cleared (${n} saved item${n === 1 ? '' : 's'}).` : 'coee: the cache was already empty.');
 		}),
 		vscode.commands.registerCommand('coee.plan', async (uri?: unknown, draft?: string) => walkthrough.openPlan(await folderOf(uri), typeof draft === 'string' ? draft : undefined)),
+		vscode.commands.registerCommand('coee.walkPart', async (uri?: unknown, part?: TourPart) => walkthrough.tour(await folderOf(uri), part).catch(err => walkthrough.fail(err))),
 		vscode.commands.registerCommand('coee.tour', async (uri?: unknown) => walkthrough.tour(await folderOf(uri)).catch(err => walkthrough.fail(err))),
-		vscode.commands.registerCommand('coee.review', async (arg?: unknown) => walkthrough.review(await dirOf(arg)).catch(err => walkthrough.fail(err))),
-		vscode.commands.registerCommand('coee.reviewStaged', async (arg?: unknown) => walkthrough.review(await dirOf(arg), 'staged').catch(err => walkthrough.fail(err))),
+		vscode.commands.registerCommand('coee.changes', safe(async (arg?: unknown) => changes.open(await dirOf(arg)))),
 		vscode.commands.registerCommand('coee.reviewCommit', async (...args: unknown[]) => {
 			try {
 				// From the Source Control Graph: (repository, commit). Elsewhere: pick a commit.
@@ -94,6 +104,18 @@ export function activate(context: vscode.ExtensionContext) {
 			} catch (err) { walkthrough.fail(err); }
 		}),
 		vscode.commands.registerCommand('coee.architecture', safe(async (arg?: unknown, focus?: unknown) => architecture.open(await dirOf(arg), false, typeof focus === 'string' ? focus : undefined))),
+		// The page switcher on every coee page.
+		vscode.commands.registerCommand('coee.go', safe(async (to?: unknown, root?: unknown) => {
+			const r = root instanceof vscode.Uri ? root : undefined;
+			switch (to) {
+				case 'architecture': return architecture.open(r);
+				case 'changes': return vscode.commands.executeCommand('coee.changes', r);
+				case 'security': return security.open(r);
+				case 'plan': return walkthrough.openPlan(r);
+				case 'walkthrough': if (!walkthrough.show()) vscode.window.showInformationMessage('coee: no walkthrough yet. Click Explain above a function, or Walk me through on the architecture page.'); return;
+			}
+		})),
+		vscode.commands.registerCommand('coee.exportSarif', () => security.exportSarif()),
 		vscode.commands.registerCommand('coee.recent', () => walkthrough.pickRecent().catch(err => walkthrough.fail(err))),
 	);
 }

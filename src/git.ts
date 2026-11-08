@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { FileDiff, addedLines, diffStats, parseUnifiedDiff, removedRuns } from './prompt';
+import { codeColumn } from './ui';
 
 /** git's empty tree: the "before" of a repository's first commit. */
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -14,7 +15,14 @@ function run(cwd: string, cmd: string, args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => execFile(cmd, args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, out, errOut) =>
 		err ? reject(new Error((errOut || err.message).trim().split('\n')[0])) : resolve(out)));
 }
-const git = (cwd: string, ...args: string[]) => run(cwd, 'git', args);
+/**
+ * git, with the repository's own config kept from running programs: a repo's .git/config can name an fsmonitor,
+ * hooks or diff drivers that git would execute. And only in a workspace the user trusts.
+ */
+const git = (cwd: string, ...args: string[]) => {
+	if (!vscode.workspace.isTrusted) return Promise.reject(new Error('coee only runs git in a trusted workspace. Trust this folder (Manage Workspace Trust) to review its changes.'));
+	return run(cwd, 'git', ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, ...args]);
+};
 const ok = (p: Promise<unknown>) => p.then(() => true, () => false);
 
 /** The "head" side of a review: a commit, the staging area, or the files on disk. */
@@ -31,6 +39,8 @@ export interface ReviewTarget {
 	precommit?: boolean;
 	message?: string;
 	note?: string;
+	/** Working-tree targets: include new files git doesn't track yet. */
+	untracked?: boolean;
 }
 
 export interface ReviewFile { diff: FileDiff; text?: string; added: number[]; removed: Array<{ after: number; lines: string[] }>; plus: number; minus: number }
@@ -47,6 +57,17 @@ export async function repoRoot(dir: vscode.Uri): Promise<string> {
 const hasHead = (repo: string) => ok(git(repo, 'rev-parse', '--verify', '-q', 'HEAD'));
 const short = (sha: string) => sha.slice(0, 7);
 
+/** Everything not yet committed: staged and unstaged edits, and new files git doesn't track yet. */
+export async function working(repo: string): Promise<ReviewTarget> {
+	const base = await hasHead(repo) ? 'HEAD' : EMPTY_TREE;
+	return { repo, base, head: 'WORKTREE', what: 'uncommitted changes', header: 'Uncommitted changes', precommit: true, untracked: true };
+}
+
+/** Only what is staged: the next commit. */
+export async function stagedOnly(repo: string): Promise<ReviewTarget> {
+	return { repo, base: await hasHead(repo) ? 'HEAD' : EMPTY_TREE, head: 'INDEX', what: 'staged changes (what the next commit will contain)', header: 'Staged changes', precommit: true };
+}
+
 async function staged(repo: string): Promise<ReviewTarget> {
 	const base = await hasHead(repo) ? 'HEAD' : EMPTY_TREE;
 	const any = !(await ok(git(repo, 'diff', '--cached', '--quiet', base)));
@@ -61,7 +82,7 @@ export async function commit(repo: string, sha: string): Promise<ReviewTarget> {
 	return { repo, base: parent, head: sha, what: `commit ${short(sha)}`, header: `${short(sha)} · ${subject.trim()}`, message: `${subject}\n\n${body ?? ''}`.trim() };
 }
 
-async function pickCommit(repo: string, placeHolder: string): Promise<string | undefined> {
+export async function pickCommit(repo: string, placeHolder: string): Promise<string | undefined> {
 	const log = await git(repo, 'log', '-50', '--format=%H%x09%s%x09%an%x09%ar');
 	const items = log.trim().split('\n').filter(Boolean).map(l => { const [sha, s, who, when] = l.split('\t'); return { label: s, description: `${short(sha)} · ${who} · ${when}`, sha }; });
 	return (await vscode.window.showQuickPick(items, { placeHolder, matchOnDescription: true }))?.sha;
@@ -83,7 +104,7 @@ async function defaultBase(repo: string): Promise<string | undefined> {
 	return undefined;
 }
 
-async function branchVsBase(repo: string): Promise<ReviewTarget | undefined> {
+export async function branchVsBase(repo: string): Promise<ReviewTarget | undefined> {
 	const base = await defaultBase(repo);
 	if (!base) { vscode.window.showWarningMessage('coee: couldn\'t find main or master to compare with. Use "Pick two commits or branches…".'); return undefined; }
 	const branch = (await git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
@@ -91,28 +112,6 @@ async function branchVsBase(repo: string): Promise<ReviewTarget | undefined> {
 	const subjects = (await git(repo, 'log', '--format=- %s', `${fork}..HEAD`)).trim();
 	if (!subjects) { vscode.window.showInformationMessage(`coee: ${branch} has no commits that ${base} doesn't have.`); return undefined; }
 	return { repo, base: fork, head: 'HEAD', what: `the branch ${branch} compared with ${base}`, header: `${base} … ${branch}`, message: `Commits on this branch:\n${subjects}` };
-}
-
-async function pullRequest(repo: string): Promise<ReviewTarget | undefined> {
-	let list: Array<{ number: number; title: string; author: { login: string }; headRefName: string; baseRefName: string }>;
-	try {
-		list = JSON.parse(await run(repo, 'gh', ['pr', 'list', '--json', 'number,title,author,headRefName,baseRefName', '-L', '30']));
-	} catch (err) {
-		const msg = (err as Error).message;
-		throw new Error(/ENOENT/.test(msg) ? 'Reviewing a GitHub pull request needs the GitHub CLI (gh). Install it from cli.github.com and run "gh auth login".'
-			: /auth|login/i.test(msg) ? 'The GitHub CLI isn\'t signed in. Run "gh auth login" in a terminal, then try again.' : `GitHub: ${msg}`);
-	}
-	if (!list.length) { vscode.window.showInformationMessage('coee: this repository has no open pull requests.'); return undefined; }
-	const pick = await vscode.window.showQuickPick(list.map(p => ({ label: `#${p.number} ${p.title}`, description: `${p.author?.login ?? ''} · ${p.headRefName} → ${p.baseRefName}`, p })), { placeHolder: 'Which pull request?', matchOnDescription: true });
-	if (!pick) return undefined;
-	const n = pick.p.number;
-	const view = JSON.parse(await run(repo, 'gh', ['pr', 'view', String(n), '--json', 'title,body,baseRefOid,headRefOid'])) as { title: string; body: string; baseRefOid: string; headRefOid: string };
-	await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `coee: fetching PR #${n}` }, async () => {
-		await git(repo, 'fetch', '--no-tags', 'origin', `pull/${n}/head:refs/coee/pr-${n}`, '--force');
-		if (!await ok(git(repo, 'cat-file', '-e', `${view.baseRefOid}^{commit}`))) await git(repo, 'fetch', '--no-tags', 'origin', pick.p.baseRefName);
-	});
-	const fork = (await git(repo, 'merge-base', view.baseRefOid, view.headRefOid)).trim();
-	return { repo, base: fork, head: view.headRefOid, what: `pull request #${n}: ${view.title}`, header: `PR #${n} · ${view.title}`, message: `${view.title}\n\n${view.body ?? ''}`.trim() };
 }
 
 /** Ask what to review. `preset` skips the picker for the Source Control buttons. */
@@ -123,7 +122,6 @@ export async function pickReview(repo: string, preset?: 'staged' | 'commit'): Pr
 		{ label: '$(checklist) Before you commit', description: 'what your staged (or uncommitted) changes do', id: 'staged' },
 		{ label: '$(git-commit) A commit…', description: 'what any commit did', id: 'commit' },
 		{ label: '$(history) The last commit', description: 'HEAD', id: 'last' },
-		{ label: '$(git-pull-request) A GitHub pull request…', description: 'an open PR, via the GitHub CLI', id: 'pr' },
 		{ label: '$(git-branch) This branch vs main', description: 'everything your branch adds, like a PR', id: 'branch' },
 		{ label: '$(git-compare) Two commits or branches…', description: 'any range', id: 'range' },
 	], { placeHolder: 'What should coee review?' });
@@ -131,7 +129,6 @@ export async function pickReview(repo: string, preset?: 'staged' | 'commit'): Pr
 		case 'staged': return staged(repo);
 		case 'commit': { const sha = await pickCommit(repo, 'Which commit?'); return sha ? commit(repo, sha) : undefined; }
 		case 'last': return commit(repo, (await git(repo, 'rev-parse', 'HEAD')).trim());
-		case 'pr': return pullRequest(repo);
 		case 'branch': return branchVsBase(repo);
 		case 'range': {
 			const base = await pickRef(repo, 'Compare from (older)…');
@@ -143,9 +140,10 @@ export async function pickReview(repo: string, preset?: 'staged' | 'commit'): Pr
 }
 
 /** The diff of a target, its files ranked by size (noise skipped), and each file's new text. */
-export async function collect(t: ReviewTarget): Promise<Review> {
-	const args = ['diff', '--find-renames', '-U3', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/'];
-	const raw = await git(t.repo, ...(t.head === 'INDEX' ? [...args, '--cached', t.base] : t.head === 'WORKTREE' ? [...args, t.base] : [...args, t.base, t.head]));
+export async function collect(t: ReviewTarget, allowEmpty = false): Promise<Review> {
+	const args = ['diff', '--find-renames', '-U3', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
+	let raw = await git(t.repo, ...(t.head === 'INDEX' ? [...args, '--cached', t.base] : t.head === 'WORKTREE' ? [...args, t.base] : [...args, t.base, t.head]));
+	if (t.untracked) raw += await untrackedDiff(t.repo);
 	const all = parseUnifiedDiff(raw);
 	const kept = all.filter(f => !NOISE.test(f.path)).map(diff => ({ diff, ...diffStats(diff) })).sort((a, b) => (b.plus + b.minus) - (a.plus + a.minus));
 	const files: ReviewFile[] = [];
@@ -159,13 +157,31 @@ export async function collect(t: ReviewTarget): Promise<Review> {
 		}
 		files.push({ diff: k.diff, text, added: addedLines(k.diff), removed: removedRuns(k.diff), plus: k.plus, minus: k.minus });
 	}
-	if (!files.length) throw new Error(all.length ? 'Only lockfiles or generated files changed here, so there is nothing to explain.' : 'There are no changes to review here.');
+	if (!files.length && !allowEmpty) throw new Error(all.length ? 'Only lockfiles or generated files changed here, so there is nothing to explain.' : 'There are no changes to review here.');
 	const plus = files.reduce((n, f) => n + f.plus, 0), minus = files.reduce((n, f) => n + f.minus, 0);
 	const head = t.head === 'INDEX' || t.head === 'WORKTREE' ? raw : (await git(t.repo, 'rev-parse', t.head)).trim();
 	return { files, skipped: Math.max(0, all.length - files.length), plus, minus, key: `${t.base}..${head}:${raw.length}:${hash(raw)}` };
 }
 
-function hash(s: string) {
+/** Every file git knows here (tracked, plus new files not ignored), relative to `dir`. Fast, and respects .gitignore. */
+export async function lsFiles(dir: string): Promise<string[]> {
+	return (await git(dir, 'ls-files', '-co', '--exclude-standard', '-z')).split('\0').filter(Boolean);
+}
+
+/** New files git doesn't track yet, as "added" diffs (git diff leaves them out). */
+async function untrackedDiff(repo: string): Promise<string> {
+	const list = (await git(repo, 'ls-files', '--others', '--exclude-standard', '-z')).split('\0').filter(p => p && !NOISE.test(p)).slice(0, MAX_FILES);
+	let out = '';
+	for (const p of list) {
+		const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(path.join(repo, p))).then(b => b, () => undefined);
+		if (!bytes || bytes.length > 200_000 || bytes.includes(0)) continue; // missing, big or binary
+		const lines = new TextDecoder().decode(bytes).replace(/\n$/, '').split('\n');
+		out += `diff --git a/${p} b/${p}\nnew file mode 100644\n--- /dev/null\n+++ b/${p}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(l => '+' + l).join('\n')}\n`;
+	}
+	return out;
+}
+
+export function hash(s: string) {
 	let h = 0;
 	for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
 	return (h >>> 0).toString(16);
@@ -186,10 +202,10 @@ function gitApi(): GitApi | undefined {
 /** Show one file's change as VS Code's own diff. */
 export async function openDiff(t: ReviewTarget, file: string, oldPath?: string) {
 	const api = gitApi(), right = vscode.Uri.file(path.join(t.repo, file)), left = vscode.Uri.file(path.join(t.repo, oldPath ?? file));
-	if (!api) return vscode.window.showTextDocument(right);
+	if (!api) return vscode.window.showTextDocument(right, { viewColumn: codeColumn() });
 	const ref = (side: Side) => side === 'WORKTREE' ? undefined : side === 'INDEX' ? '' : side; // '' is the index for the git extension
 	const r = ref(t.head);
-	await vscode.commands.executeCommand('vscode.diff', api.toGitUri(left, t.base === EMPTY_TREE ? 'HEAD' : t.base), r === undefined ? right : api.toGitUri(right, r), `${file} · ${t.header}`);
+	await vscode.commands.executeCommand('vscode.diff', api.toGitUri(left, t.base === EMPTY_TREE ? 'HEAD' : t.base), r === undefined ? right : api.toGitUri(right, r), `${file} · ${t.header}`, { viewColumn: codeColumn() });
 }
 
 /** Put a message in the Source Control box. Nothing is committed. */

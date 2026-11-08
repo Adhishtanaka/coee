@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAskPrompt, buildExplainPrompt, isTestFile, buildPlanPickPrompt, buildPlanPrompt, outermost, repairPick, buildTourOverviewPrompt, buildTourPartPrompt, excerpt, packFiles, repairDiagram, fitExcerpts, numbered, numberedFit, packChapters, parseJson, repair, repairMap } from '../prompt';
+import { buildAskPrompt, buildExplainPrompt, isTestFile, buildPlanPickPrompt, buildPlanPrompt, outermost, repairPick, repairPlan, repairSnippets, snapRefs, blockEnd, repairSecurity, mergeReports, batchFiles, buildSecurityPrompt, toSarif, depFinding, buildTourOverviewPrompt, buildTourPartPrompt, excerpt, packFiles, repairDiagram, fitExcerpts, numbered, numberedFit, packChapters, parseJson, repair, repairMap } from '../prompt';
 import { diagramSvg, layers, wrap } from '../layout';
 
 const scene = { title: 'a', startLine: 10, endLine: 12, text: 'x' };
@@ -191,7 +191,7 @@ test('outermost keeps separate codebases and drops projects nested in them', () 
 	assert.deepEqual(outermost(['ab', 'a']), ['a', 'ab']);
 });
 
-test('plan: file pick keeps known paths only, prompt explains without code and stays in budget', () => {
+test('plan: file pick keeps known paths only, prompt asks for code and tests and stays in budget', () => {
 	const tree = ['server/app.js', 'server/middleware/rateLimit.js', 'web/apiClient.js'];
 	assert.deepEqual(repairPick({ approach: 'cache in middleware', files: [{ path: 'rateLimit.js' }, { path: 'nope.js' }, 'server/app.js'] }, tree).value,
 		{ approach: 'cache in middleware', files: ['server/middleware/rateLimit.js', 'server/app.js'] });
@@ -201,8 +201,8 @@ test('plan: file pick keeps known paths only, prompt explains without code and s
 	const files = [{ path: 'server/app.js', text: 'x\n'.repeat(5000) }];
 	const p = buildPlanPrompt(map, 'How would I add Redis caching?', 'cache in middleware', files, 15000);
 	assert.ok(p.length < 16000);
-	assert.match(p, /WITHOUT writing its code/);
-	assert.match(p, /Integration point[\s\S]*Implementation order/);
+	assert.match(p, /"snippets"/);
+	assert.match(p, /Integration point[\s\S]*Tests" \(ALWAYS, last\)/);
 	assert.match(p, /A first read of the codebase suggests: cache in middleware/);
 });
 
@@ -396,4 +396,123 @@ test('test code is explained as use cases', () => {
 	for (const word of ["What's tested", 'Use case', 'Given / When / Then', 'Edge case', 'Coverage']) assert.ok(p.includes(word), word);
 	assert.ok(!p.includes('Module state'), 'test mode replaces file mode');
 	assert.ok(buildExplainPrompt({ ...ctx, part: { index: 1, count: 3, earlier: [] } }).includes('only the use cases in these lines'));
+});
+
+const server = { path: 'server.js', text: [
+	"const store = require('./store');",           // 1
+	'',                                            // 2
+	'const server = http.createServer(async (req, res) => {', // 3
+	"  if (req.method === 'GET') return send(res, 200, store.list());", // 4
+	'',                                            // 5
+	"  if (req.method === 'POST') {",             // 6
+	'    const body = await readJson(req);',       // 7
+	'    return send(res, 201, store.create(body));', // 8
+	'  }',                                         // 9
+	'});',                                         // 10
+	'',                                            // 11
+	'def_like = 1',                                // 12
+].join('\n') };
+
+test('snapRefs: a symbol wins over wrong numbers, and the range covers the whole block', () => {
+	const [post] = snapRefs([{ path: 'server.js', symbol: "if (req.method === 'POST') {", startLine: 3, endLine: 4 }], [server]);
+	assert.deepEqual([post.startLine, post.endLine, post.symbol], [6, 9, undefined]);
+	const [get] = snapRefs([{ path: 'server.js', symbol: "if (req.method === 'GET')", startLine: 1, endLine: 2 }], [server]);
+	assert.deepEqual([get.startLine, get.endLine], [4, 4]); // one statement: not the block after it
+	const [outer] = snapRefs([{ path: 'server.js', symbol: 'http.createServer' }], [server]);
+	assert.deepEqual([outer.startLine, outer.endLine], [3, 10]);
+});
+
+test('snapRefs: without a symbol the numbers are only clamped; unknown files are left alone', () => {
+	assert.deepEqual(snapRefs([{ path: 'server.js', startLine: 8, endLine: 400 }], [server]), [{ path: 'server.js', startLine: 8, endLine: 12 }]);
+	assert.deepEqual(snapRefs([{ path: 'other.js', startLine: 8 }], [server]), [{ path: 'other.js', startLine: 8 }]);
+});
+
+test('blockEnd: braces, indentation and a missing end', () => {
+	assert.equal(blockEnd(['function f() {', '  if (x) {', '  }', '}', 'next'], 0), 3);
+	assert.equal(blockEnd(['def f():', '    a = 1', '', '    return a', 'x = 2'], 0), 3);
+	assert.equal(blockEnd(['if (a) {', '  b();'], 0), 1);
+});
+
+test('plan snippets: kept when usable, dropped when they point nowhere', () => {
+	const known = ['src/app.js'];
+	const sn = repairSnippets([
+		{ file: 'app.js', mode: 'insert', after: 'const k = key(req);', code: '\n  cache.get(k);\n', lang: 'js' },
+		{ file: 'src/app.js', mode: 'insert', code: 'no anchor' },
+		{ file: 'nope.js', mode: 'insert', after: '', code: 'x' },
+		{ file: '../evil.js', mode: 'new', code: 'x' },
+		{ file: '/etc/passwd', mode: 'new', code: 'x' },
+		{ file: 'test/app.test.js', mode: 'new', code: "test('x', () => {})" },
+		{ file: 'src/app.js', mode: 'replace', code: '' },
+	], known);
+	assert.deepEqual(sn.map(x => [x.file, x.mode, x.after]), [['src/app.js', 'insert', 'const k = key(req);'], ['test/app.test.js', 'new', undefined]]);
+	assert.equal(sn[0].code, '  cache.get(k);');
+});
+
+test('repairPlan asks again when the plan has no tests, and accepts it when it does', () => {
+	const lines = { 'src/app.js': 50 };
+	const sc = (label: string, snippets?: unknown) => ({ label, title: 't', text: 'x', file: 'src/app.js', startLine: 1, endLine: 2, snippets });
+	const code = [{ file: 'src/app.js', mode: 'insert', after: '', code: 'a()' }];
+	const none = repairPlan({ title: 'P', scenes: [sc('Integration point'), sc('Change in app', code)] }, lines);
+	assert.ok(none.value && none.errors.length === 1 && /Tests/.test(none.errors[0]));
+	const withTests = repairPlan({ title: 'P', scenes: [sc('Change in app', code), sc('Tests', [{ file: 'src/app.test.js', mode: 'new', code: 'test()' }])] }, lines);
+	assert.deepEqual(withTests.errors, []);
+	assert.equal(withTests.value!.scenes[1].snippets![0].file, 'src/app.test.js');
+});
+
+test('security: findings are checked against the files, deduped and sorted worst first', () => {
+	const f = { path: 'server.js', text: server.text };
+	const draft = { summary: 'Two problems.', findings: [
+		{ severity: 'low', category: 'Logging', title: 'Noisy', file: 'server.js', startLine: 1, endLine: 1, why: 'Logs too much.' },
+		{ severity: 'critical', category: 'Command injection', cwe: '78', title: 'exec of input', file: './server.js', symbol: "if (req.method === 'POST') {", startLine: 99, endLine: 120, why: 'Runs user input.', exploit: 'POST ;rm -rf', fix: 'Validate.', fixCode: '\nsafe()\n', testCode: 'test()' },
+		{ severity: 'critical', category: 'command injection', title: 'dup', file: 'server.js', symbol: "if (req.method === 'POST') {", why: 'again' },
+		{ severity: 'high', category: 'XSS', title: 'no file', file: 'missing.js', why: 'x' },
+		{ severity: 'bogus', category: 'Other', title: 'odd severity', file: 'server.js', startLine: 4, why: 'x' },
+	] };
+	const { value, errors } = repairSecurity(draft, [f]);
+	assert.deepEqual(errors, []);
+	assert.deepEqual(value!.findings.map(x => [x.id, x.severity, x.title]), [['f1', 'critical', 'exec of input'], ['f2', 'medium', 'odd severity'], ['f3', 'low', 'Noisy']]);
+	const first = value!.findings[0];
+	assert.deepEqual([first.startLine, first.endLine, first.cwe, first.fixCode], [6, 9, 'CWE-78', 'safe()']);
+	assert.equal(repairSecurity({ findings: [] }, [f]).value!.findings.length, 0);
+	assert.ok(repairSecurity({ summary: 'x' }, [f]).errors.length);
+});
+
+test('security: reports merge, and files batch by size', () => {
+	const mk = (file: string, severity: any) => ({ id: 'x', severity, category: 'c', title: 't', file, startLine: 1, endLine: 1, why: 'w', exploit: '', fix: '' });
+	const m = mergeReports([{ summary: '', findings: [mk('b.js', 'low'), mk('a.js', 'high')] }, { summary: 'second', findings: [mk('a.js', 'high'), mk('c.js', 'critical')] }]);
+	assert.deepEqual(m.findings.map(x => x.file), ['c.js', 'a.js', 'b.js']);
+	assert.equal(m.summary, 'second');
+	const files = ['a', 'b', 'c'].map(n => ({ path: n, text: 'x'.repeat(40) }));
+	assert.deepEqual(batchFiles(files, 100).map(b => b.map(f => f.path)), [['a', 'b'], ['c']]);
+	assert.deepEqual(batchFiles([{ path: 'big', text: 'x'.repeat(500) }], 100).map(b => b.length), [1]);
+	const p = buildSecurityPrompt(files, 'the project demo', 1e9);
+	assert.match(p, /IDOR[\s\S]*--- a\n/);
+});
+
+test('security: rule hits are confirmed, rejected, or kept as unconfirmed when the model skips them', () => {
+	const f = { path: 'files.js', text: "const a = 1;\nexports.calc = expr => eval(expr);\nexports.t = () => Math.random().toString(36);\nexports.x = y => eval(y);" };
+	const hit = (id: string, rule: string, line: number) => ({ id, rule, title: rule, file: 'files.js', line, text: '', cwe: rule === 'js-eval' ? 'CWE-95' : 'CWE-338', owasp: rule === 'js-eval' ? 'A03' : 'A02', severity: 'high' as const, why: 'w', fix: 'f' });
+	const hits = [hit('h1', 'js-eval', 2), hit('h2', 'weak-random', 3), hit('h3', 'js-eval', 4)];
+	const draft = {
+		summary: 's',
+		findings: [{ hit: 'h1', severity: 'critical', owasp: 'a03', title: 'eval of user input', why: 'Runs input as code.', exploit: 'POST {"expr":"process.exit()"}',
+			attack: { nodes: [{ id: 'a', label: 'Attacker' }, { id: 'r', label: 'calc' }], edges: [{ from: 'a', to: 'r', label: 'expr' }] }, verify: 'Send it.', severityWhy: 'Anyone can call it.' }],
+		rejected: [{ id: 'h2', reason: 'Only used for a cache-busting suffix.' }],
+	};
+	const { value } = repairSecurity(draft, [f], hits);
+	const [eval1, eval2] = value!.findings;
+	assert.deepEqual([eval1.source, eval1.confirmed, eval1.severity, eval1.owasp, eval1.startLine, eval1.cwe, eval1.attack!.kind], ['rule', true, 'critical', 'A03', 2, 'CWE-95', 'sequence']);
+	assert.deepEqual([eval2.source, eval2.confirmed, eval2.startLine], ['rule', false, 4]); // the model never mentioned h3
+	assert.deepEqual(value!.rejected!.map(r => [r.hit, r.reason]), [['h2', 'Only used for a cache-busting suffix.']]);
+	assert.equal(value!.findings.length, 2);
+});
+
+test('security: dependency findings and SARIF export', () => {
+	const d = depFinding({ name: 'lodash', version: '4.17.20', file: 'package.json', id: 'GHSA-x', title: 'Prototype Pollution', severity: 'high', fixed: '4.17.21' }, 12);
+	assert.deepEqual([d.owasp, d.startLine, d.source], ['A06', 12, 'dependency']);
+	assert.match(d.fix, /4\.17\.21/);
+	const sarif = toSarif({ summary: '', findings: [{ ...d, id: 'f1', cwe: 'CWE-1035' }] }) as any;
+	assert.equal(sarif.version, '2.1.0');
+	assert.deepEqual(sarif.runs[0].results[0].locations[0].physicalLocation.region, { startLine: 12, endLine: 12 });
+	assert.equal(sarif.runs[0].results[0].level, 'error');
 });

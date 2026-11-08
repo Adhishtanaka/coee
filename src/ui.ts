@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
+import { chooseColumns } from './columns';
 
 /**
  * Shared webview shell. Everything themes off VS Code's variables. The one brand colour is the amber
@@ -52,6 +53,11 @@ textarea:focus, input:focus, select:focus { outline: 1px solid var(--vscode-focu
 .sweep::after { content: ''; position: absolute; inset: 0; width: 40%; background: var(--mark); border-radius: 2px; animation: sweep 1.4s ease-in-out infinite; }
 @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
 @media (prefers-reduced-motion: reduce) { .sweep::after { animation: none; width: 100%; opacity: .5; } }
+/* The same switcher on every coee page: the pages are one tool, not five. */
+.coeenav { display: flex; gap: 2px; flex-wrap: wrap; padding: 2px; border: 1px solid var(--line); border-radius: 6px; }
+.coeenav button { border: 0; background: none; padding: 2px 9px; border-radius: 4px; color: var(--muted); font-size: .92em; white-space: nowrap; }
+.coeenav button:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+.coeenav button[aria-current="page"] { color: var(--vscode-foreground); background: var(--vscode-toolbar-activeBackground, var(--vscode-list-activeSelectionBackground)); font-weight: 600; }
 `;
 
 /** Light, safe markdown for model replies (shared by every webview). */
@@ -76,6 +82,13 @@ function md(text) {
   return d;
 }
 
+// The switcher between coee's pages; the extension opens the page (for the same project) when one is picked.
+const PAGES = [['architecture', 'Architecture'], ['changes', 'Changes'], ['security', 'Security'], ['plan', 'Plan'], ['walkthrough', 'Walkthrough']];
+function coeeNav(current) {
+  return el('nav', { className: 'coeenav', 'aria-label': 'coee pages' }, ...PAGES.map(([id, label]) =>
+    el('button', { 'aria-current': id === current ? 'page' : null, onclick: () => id !== current && vscode.postMessage({ type: 'nav', to: id }) }, label)));
+}
+
 `;
 
 export function page(webview: vscode.Webview, opts: { css: string; body: string; script: string; scripts?: vscode.Uri[] }): string {
@@ -93,4 +106,39 @@ const el = (tag, props = {}, ...kids) => { const e = document.createElement(tag)
 ${MD}
 ${opts.script}
 </script></body></html>`;
+}
+
+/** Open `path` (relative to `root`) beside the editor with lines `start`-`end` selected, the whole last line included. */
+export async function showLines(root: vscode.Uri, path: string, start?: number, end?: number) {
+	const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, path));
+	const last = doc.lineCount - 1;
+	const a = Math.max(0, Math.min((start ?? 1) - 1, last)), b = Math.max(a, Math.min((end ?? start ?? 1) - 1, last));
+	await vscode.window.showTextDocument(doc, { viewColumn: codeColumn(), preview: true, selection: start ? new vscode.Range(a, 0, b, doc.lineAt(b).range.end.character) : undefined });
+}
+
+const panels = new Set<vscode.WebviewPanel>();
+/** Text editor groups, most recently focused first (only VS Code knows the order; this remembers it). */
+let recent: number[] = [];
+export function watchEditors(): vscode.Disposable {
+	const note = (e?: vscode.TextEditor) => { if (e?.viewColumn && e.document.uri.scheme !== 'output') recent = [e.viewColumn, ...recent.filter(c => c !== e.viewColumn)]; };
+	note(vscode.window.activeTextEditor);
+	return vscode.window.onDidChangeActiveTextEditor(note);
+}
+
+function columns() {
+	const open = new Set(vscode.window.visibleTextEditors.map(e => e.viewColumn).filter((c): c is vscode.ViewColumn => !!c));
+	const editors = [...recent.filter(c => open.has(c)), ...[...open].filter(c => !recent.includes(c))];
+	return chooseColumns([...panels].map(p => p.viewColumn).filter((c): c is vscode.ViewColumn => !!c), editors);
+}
+/** The group coee's pages live in, as tabs. */
+export const coeeColumn = (): vscode.ViewColumn => columns().coee;
+/** The group code opens in: never coee's. */
+export const codeColumn = (): vscode.ViewColumn => columns().code;
+
+/** A coee page, created in coee's group without taking focus. */
+export function createPanel(type: string, title: string, opts: vscode.WebviewPanelOptions & vscode.WebviewOptions): vscode.WebviewPanel {
+	const panel = vscode.window.createWebviewPanel(type, title, { viewColumn: coeeColumn(), preserveFocus: true }, opts);
+	panels.add(panel);
+	panel.onDidDispose(() => panels.delete(panel));
+	return panel;
 }

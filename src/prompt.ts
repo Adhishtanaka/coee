@@ -21,7 +21,15 @@ export interface Scene {
 	diagram?: Diagram;
 	/** Index of the chapter (part of a long range) the scene came from. */
 	part?: number;
+	/** Plans: code to add for this scene, which the reader can copy or insert. */
+	snippets?: Snippet[];
 }
+
+/**
+ * Code a plan proposes, placed by the text around it (line numbers drift as soon as anything changes):
+ * "insert" goes after the existing lines `after`, "replace" takes the place of the existing text `find`, "new" is a new file.
+ */
+export interface Snippet { file: string; mode: 'insert' | 'replace' | 'new'; code: string; after?: string; find?: string; lang?: string }
 
 export interface Term { name: string; meaning: string }
 export interface Walkthrough {
@@ -229,8 +237,9 @@ export function packFiles(files: FolderFile[], room: number): string {
 	return shown.join('\n\n') + (listed.length ? `\n\nOther files (not shown):\n${listed.join('\n')}` : '');
 }
 
-function filesWalkthrough(task: string, files: FolderFile[], budget: number, scenes: string): string {
-	return `${ROLE}
+function filesWalkthrough(task: string, files: FolderFile[], budget: number, scenes: string, opts: { role?: string; snippets?: boolean } = {}): string {
+	const scene = SCENE_SCHEMA(true).replace(/\}$/, opts.snippets ? `, "snippets"?: [{"file": string, "mode": "insert"|"replace"|"new", "after"?: string, "find"?: string, "lang"?: string, "code": string}]}` : '}');
+	return `${opts.role ?? ROLE}
 ${GUIDE}
 
 ${task}
@@ -241,7 +250,7 @@ ${EXPLAINING}
 ${DIAGRAM_RULES}
 
 Reply with ONLY JSON, no prose:
-{"title": string, "summary": string (one or two sentences), ${LEARNING_SCHEMA}, "scenes": [${SCENE_SCHEMA(true)}]}
+{"title": string, "summary": string (one or two sentences), ${LEARNING_SCHEMA}, "scenes": [${scene}]}
 
 ${packFiles(files, budget - FIXED - task.length - 1500)}`;
 }
@@ -258,16 +267,21 @@ ${map.connections.map(e => `- ${name(e.from)} → ${name(e.to)}: ${e.label ?? ''
 // ---------------------------------------------------------------------------
 // Plan a change: a walkthrough of how a proposed change would integrate, explained without writing it
 
-const PLAN_RULES = `Explain the change WITHOUT writing its code: no code blocks, no new functions spelled out. The reader wants to understand how the new logic would fit into this codebase and what it would affect, well enough to plan it or judge a plan.
+const PLAN_ROLE = 'You plan changes to a codebase for a developer who will make them. You propose the code, they decide whether to use it.';
+const PLAN_RULES = `Explain how the change fits into this codebase, and give the code for it, so the reader can plan it, judge it and add it themselves.
 Ground every claim in the files shown: each scene points at the EXISTING lines it is about (where the new logic would hook in, or what it would change). Say when something would be new, and where it would live.
 Use these scene labels, in this order, skipping any that don't apply:
 - "Integration point": the existing seam (a middleware chain, a call site, a configuration, an interface) the change attaches to, and why there.
 - "Proposed flow": the request or data path once the change exists, as a "sequence" diagram with the new participant, marked "illustrative": true.
-- "Affected component": one scene per affected component: what its responsibility becomes and which of its lines are involved.
+- "Change in <component>": one scene per file that changes: what its responsibility becomes, with the code in "snippets" (see below).
 - "State and data": new or changed state, storage, configuration or lifecycle (a "state" diagram if a lifecycle changes).
-- "Downstream impact": callers, tests, deployment, performance and other components that would be affected.
 - "Risks and trade-offs": failure modes, and the main design decision with its alternative.
-- "Implementation order": the sequence of work a developer would follow, and how to verify each step.
+- "Tests" (ALWAYS, last): which cases the tests cover (the happy path, each edge case and each failure the change introduces), and the test code in "snippets", written in the project's own test framework, file naming and style (if it has none, use the language's standard one). Point the scene at the code under test.
+"snippets": the code to add, as small as works, in the project's style and matching what the files already do. Each one: {"file", "mode", "code", "after"?, "find"?, "lang"?}. Snippets are placed by the text around them, never by line numbers:
+  "insert": "file" is a file shown; "after" is 1-3 existing lines copied EXACTLY from that file (without the line numbers), unique in it; "code" goes right after them. Use "after": "" only to put code at the very top (imports).
+  "replace": "find" is the existing text to replace, copied EXACTLY from the file (whole lines, without line numbers), unique in it; "code" is what replaces it. Replace only what changes, and never replace a line with a much bigger block that keeps it: insert instead.
+  "new": "file" is a new path inside the project (a test file, usually); "code" is the whole file.
+  Write complete, runnable code. The reader may copy it or insert it with one click.
 Write in a clear, professional tone, as in a design review.`;
 
 /** First call: which files a proposed change concerns, judged from the map and the file list. */
@@ -300,7 +314,24 @@ export function buildPlanPrompt(map: SystemMap, question: string, approach: stri
 
 The developer asks: "${question}"
 ${approach ? `A first read of the codebase suggests: ${approach}\n` : ''}
-${PLAN_RULES}`, files, budget, '5-10');
+${PLAN_RULES}`, files, budget, '5-10', { role: PLAN_ROLE, snippets: true });
+}
+
+/** A plan must carry its tests: a "Tests" scene whose snippets hold the test code. Without them the model is asked once more. */
+export function repairPlan(draft: any, files: Record<string, number>, texts: readonly FolderFile[] = []): { value?: Walkthrough; errors: string[] } {
+	const r = repair(draft, 1, 1, files);
+	if (!r.value) return r;
+	// Code whose place can't be found is sent back once; what still can't be placed is shown with Copy only.
+	const byPath = new Map(texts.map(f => [f.path, f.text]));
+	for (const sn of r.value.scenes.flatMap(s => s.snippets ?? [])) {
+		if (sn.mode === 'new' || !byPath.has(sn.file)) continue;
+		const p = placeSnippet(byPath.get(sn.file), sn);
+		if (p.status === 'error') r.errors.push(`Snippet for ${sn.file}: ${p.reason} Copy "${sn.mode === 'replace' ? 'find' : 'after'}" exactly from the file, unique lines, without line numbers`);
+	}
+	if (!r.value.scenes.some(s => /test/i.test(s.label ?? '') && s.snippets?.length)) {
+		r.errors.push('The plan must end with a scene labelled "Tests" whose "snippets" hold the test code (mode "new" for a new test file), covering the happy path and the edge cases');
+	}
+	return r;
 }
 
 /** Codebase tour, part 1: the whole system, before any one component. */
@@ -564,7 +595,7 @@ export function repair(draft: any, first: number, last: number, files?: Record<s
 		if (Number.isNaN(a)) a = b;
 		if (Number.isNaN(b)) b = a;
 		const file = files ? resolvePath(str(s?.file, 300), known) : undefined;
-		return { title: str(s?.title, 200), label: str(s?.label, 30), text: str(s?.text ?? s?.explanation), file, startLine: a, endLine: b, diagram: repairDiagram(s?.diagram ?? s?.mermaid) };
+		return { title: str(s?.title, 200), label: str(s?.label, 30), text: str(s?.text ?? s?.explanation), file, startLine: a, endLine: b, diagram: repairDiagram(s?.diagram ?? s?.mermaid), snippets: repairSnippets(s?.snippets, known) };
 	}).filter(s => s.title && s.text && !Number.isNaN(s.startLine) && (!files || s.file));
 	// Models often renumber a slice from 1; shift back when that's clearly what happened.
 	const shift = first - 1;
@@ -579,6 +610,7 @@ export function repair(draft: any, first: number, last: number, files?: Record<s
 		if (s.label) scene.label = s.label;
 		if (s.file) scene.file = s.file;
 		if (s.diagram) scene.diagram = s.diagram;
+		if (s.snippets.length) scene.snippets = s.snippets;
 		return scene;
 	});
 	if (!out.length) {
@@ -593,6 +625,82 @@ export function repair(draft: any, first: number, last: number, files?: Record<s
 	const commitMessage = str(draft.commitMessage, 600);
 	if (commitMessage) w.commitMessage = commitMessage;
 	return { value: w, errors: [] };
+}
+
+/** Code from the model: keeps its indentation, drops blank edges. A path that isn't a file shown (insert, replace) or that escapes the project (new) is dropped. */
+export function repairSnippets(raw: unknown, known: readonly string[]): Snippet[] {
+	const out: Snippet[] = [];
+	const text = (v: unknown, max: number) => typeof v === 'string' ? v.replace(/^\s*\n/, '').trimEnd().slice(0, max) : '';
+	for (const x of Array.isArray(raw) ? raw : []) {
+		const code = text(x?.code, 8000);
+		const mode = x?.mode === 'replace' || x?.mode === 'new' ? x.mode : 'insert';
+		const given = str(x?.file, 300).replace(/^\.\//, '');
+		const file = mode === 'new' ? (given && !given.startsWith('/') && !given.split('/').includes('..') ? given : undefined) : resolvePath(given, known);
+		if (!code || !file) continue;
+		const sn: Snippet = { file, mode, code };
+		if (mode === 'insert') {
+			if (typeof x?.after !== 'string') continue; // no anchor: there's no telling where it goes
+			sn.after = text(x.after, 2000);
+		}
+		if (mode === 'replace') {
+			sn.find = text(x?.find, 4000);
+			if (!sn.find) continue;
+		}
+		const lang = str(x?.lang, 20);
+		if (lang) sn.lang = lang;
+		out.push(sn);
+	}
+	return out.slice(0, 4);
+}
+
+/** Lines with their spacing ignored, so a snippet still matches after reformatting. Blank lines don't count. */
+function normLines(text: string): Array<{ n: string; line: number }> {
+	return text.split('\n').map((l, line) => ({ n: l.trim().replace(/\s+/g, ' '), line })).filter(x => x.n);
+}
+
+/** Every place where `needle`'s lines appear, in order, in `hay`'s lines: [first line, last line] (0-based). */
+function findLines(hay: string, needle: string): Array<[number, number]> {
+	const h = normLines(hay), n = normLines(needle).map(x => x.n);
+	if (!n.length) return [];
+	const hits: Array<[number, number]> = [];
+	for (let i = 0; i + n.length <= h.length; i++) {
+		if (n.every((x, k) => h[i + k].n === x)) hits.push([h[i].line, h[i + n.length - 1].line]);
+	}
+	return hits;
+}
+
+export type Placement =
+	| { status: 'ready'; from: number; to: number; text: string }
+	| { status: 'added' }
+	| { status: 'error'; reason: string };
+
+/**
+ * Where a snippet goes in the file as it is now (character offsets), or why it can't go anywhere.
+ * `fileText` is undefined when the file doesn't exist. Code that's already in the file counts as added.
+ */
+export function placeSnippet(fileText: string | undefined, sn: Snippet): Placement {
+	if (fileText === undefined) {
+		return sn.mode === 'new' ? { status: 'ready', from: 0, to: 0, text: sn.code + '\n' } : { status: 'error', reason: `${sn.file} doesn't exist any more.` };
+	}
+	// Already there (a one-line `}` proves nothing, so only code with words counts).
+	if (normLines(sn.code).some(x => /\w{3}/.test(x.n)) && findLines(fileText, sn.code).length) return { status: 'added' };
+	if (sn.mode === 'new') return { status: 'error', reason: `${sn.file} already exists with other content, so coee won't overwrite it.` };
+	const starts: number[] = [0];
+	for (let i = 0; i < fileText.length; i++) if (fileText[i] === '\n') starts.push(i + 1);
+	const endOf = (line: number) => (line + 1 < starts.length ? starts[line + 1] - 1 : fileText.length);
+	const anchor = sn.mode === 'replace' ? sn.find ?? '' : sn.after ?? '';
+	if (sn.mode === 'insert' && !normLines(anchor).length) return { status: 'ready', from: 0, to: 0, text: sn.code + '\n' }; // the very top
+	const hits = findLines(fileText, anchor);
+	if (!hits.length) return { status: 'error', reason: `The code it goes ${sn.mode === 'replace' ? 'in place of' : 'after'} isn't in ${sn.file} any more.` };
+	if (hits.length > 1) return { status: 'error', reason: `The code it goes ${sn.mode === 'replace' ? 'in place of' : 'after'} appears ${hits.length} times in ${sn.file}, so its place is unclear.` };
+	const [a, b] = hits[0];
+	if (sn.mode === 'replace') return { status: 'ready', from: starts[a], to: endOf(b), text: sn.code };
+	return { status: 'ready', from: endOf(b), to: endOf(b), text: '\n' + sn.code };
+}
+
+/** The file with a placement applied (what Apply will produce). */
+export function applyPlacement(fileText: string, p: Placement & { status: 'ready' }): string {
+	return fileText.slice(0, p.from) + p.text + fileText.slice(p.to);
 }
 
 export function repairTerms(raw: unknown): Term[] {
@@ -645,7 +753,7 @@ export function excerpt(text: string, head = 20, max = 50): string {
 // ---------------------------------------------------------------------------
 // System map
 
-export interface CodeRef { path: string; startLine?: number; endLine?: number; why?: string }
+export interface CodeRef { path: string; startLine?: number; endLine?: number; why?: string; symbol?: string }
 export interface MapComponent { id: string; name: string; summary: string; description?: string; files: CodeRef[] }
 export interface MapConnection { from: string; to: string; label?: string; detail?: string; evidence?: CodeRef[] }
 export interface SystemMap { title: string; summary: string; components: MapComponent[]; connections: MapConnection[] }
@@ -695,15 +803,64 @@ function refs(raw: unknown, known: readonly string[]): CodeRef[] {
 	const out: CodeRef[] = [];
 	for (const r of raw) {
 		const path = resolvePath(typeof r === 'string' ? r : str((r as any)?.path, 300), known);
-		if (!path || out.some(o => o.path === path)) continue;
+		if (!path) continue;
 		const ref: CodeRef = { path };
 		const a = int((r as any)?.startLine), b = int((r as any)?.endLine);
 		if (a > 0) { ref.startLine = a; ref.endLine = b >= a ? b : a; }
+		const symbol = str((r as any)?.symbol, 120).split('\n')[0].trim();
+		if (symbol) ref.symbol = symbol;
 		const why = str((r as any)?.why, 160);
 		if (why) ref.why = why;
+		// The same file may appear again for a different part of it, but not for the same place.
+		if (out.some(o => o.path === path && (o.symbol && ref.symbol ? o.symbol === ref.symbol : o.startLine === ref.startLine))) continue;
 		out.push(ref);
 	}
 	return out;
+}
+
+/** Last line (0-based) of the block that starts at `start`: matching braces, else the indented body. Capped, so a miss stays small. */
+export function blockEnd(lines: readonly string[], start: number): number {
+	const cap = Math.min(lines.length - 1, start + 150);
+	let depth = 0, opened = false;
+	// A statement that ends on its own line (";") has no body of its own; brace-matching would run into the next block.
+	const braced = !/;\s*$/.test(lines[start]) && lines.slice(start, start + 3).some(l => l.includes('{'));
+	for (let i = start; braced && i <= cap; i++) {
+		for (const ch of lines[i].replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '')) {
+			if (ch === '{') { depth++; opened = true; } else if (ch === '}') depth--;
+		}
+		if (opened && depth <= 0) return i;
+	}
+	// No braces (Python, YAML, a one-liner): the block is what is indented deeper than its first line.
+	const indent = (l: string) => l.length - l.trimStart().length;
+	let end = start;
+	for (let i = start + 1; i <= cap; i++) {
+		if (!lines[i].trim()) continue;
+		if (indent(lines[i]) <= indent(lines[start])) break;
+		end = i;
+	}
+	return end;
+}
+
+/**
+ * Make the model's line numbers match the file. A "symbol" (the text that starts the code) is looked up and wins over its numbers;
+ * the range then runs to the end of that block. Otherwise the numbers are only clamped to the file.
+ */
+export function snapRefs(list: readonly CodeRef[], files: readonly FolderFile[]): CodeRef[] {
+	const text = new Map(files.map(f => [f.path, f.text.split('\n')]));
+	return list.map(r => {
+		const lines = text.get(r.path);
+		if (!lines) return r;
+		const { symbol, ...rest } = r;
+		const want = (r.startLine ?? 1) - 1;
+		const hits = symbol ? lines.flatMap((l, i) => l.includes(symbol) ? [i] : []) : [];
+		if (hits.length) {
+			const at = hits.reduce((best, i) => Math.abs(i - want) < Math.abs(best - want) ? i : best);
+			return { ...rest, startLine: at + 1, endLine: blockEnd(lines, at) + 1 };
+		}
+		if (!r.startLine) return rest;
+		const a = Math.min(r.startLine, lines.length), b = Math.max(a, Math.min(r.endLine ?? a, lines.length));
+		return { ...rest, startLine: a, endLine: b };
+	});
 }
 
 /** Normalize a map (from the model, or stored by an older version): unknown files and dangling links are dropped. */
@@ -730,24 +887,6 @@ export function repairMap(draft: any, known: readonly string[]): { value?: Syste
 			return conn;
 		});
 	return { value: { title: str(draft.title, 120) || 'System map', summary: str(draft.summary, 400), components, connections }, errors: [] };
-}
-
-export function buildComponentPrompt(map: SystemMap, c: MapComponent, files: FileExcerpt[], question?: string, budget = 1e9): string {
-	const name = (id: string) => map.components.find(x => x.id === id)?.name ?? id;
-	const links = map.connections.filter(e => e.from === c.id || e.to === c.id)
-		.map(e => e.from === c.id ? `→ ${name(e.to)} (${e.label ?? ''})` : `← ${name(e.from)} (${e.label ?? ''})`);
-	const head = `${ROLE}
-${GUIDE}
-
-Project: ${map.title}: ${map.summary}
-Its parts: ${map.components.map(x => `${x.name} (${x.summary})`).join('; ')}
-The reader picked the part "${c.name}": ${c.description || c.summary}
-Its connections: ${links.join('; ') || 'none'}
-
-${question ? `Their question: ${question}` : `Explain what "${c.name}" is responsible for, how it works, and how it works with the parts it connects to.`}
-Under 250 words. ${STYLE} Refer to code by file and function name.
-`;
-	return `${head}\n${fitExcerpts(files, budget - head.length - 500).map(f => `--- ${f.path}\n${f.text}`).join('\n')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -909,12 +1048,12 @@ export function buildArchitecturePrompt(map: SystemMap, files: FolderFile[], bud
 
 Write the "how it works" part of an architecture document for this project, for a developer who is new to it and not very experienced. Plain words, concrete names from the code, no filler.
 - "howItWorks": 3-6 short paragraphs: what the project does, how a typical run flows through the parts above, where data lives, and the main design choices. Light markdown (\`code\` spans, **bold**) is fine.
-- "components": one entry for EVERY part listed above (use its id), with "role": 2-3 sentences on what it is responsible for and how it does it, and "keyFiles": the 1-3 files (paths exactly as written after ---) and line ranges to read first, each with a short "why".
+- "components": one entry for EVERY part listed above (use its id), with "role": 2-3 sentences on what it is responsible for and how it does it, and "keyFiles": the 1-3 files (paths exactly as written after ---) to read first, each with a short "why". Give each a "symbol": the exact text of the line where that code starts, copied from the file (a function signature or route line), so it can be found. Line numbers are optional.
 - "conventions": 2-6 patterns that hold across the code (naming, error handling, where state lives, how parts talk).
 - "terms": 3-8 words a junior may not know, with plain meanings.
 
 Reply with ONLY JSON:
-{"title": string, "summary": string (one or two sentences), "howItWorks": string, "components": [{"id": string, "role": string, "keyFiles": [{"path": string, "startLine"?: number, "endLine"?: number, "why": string}]}], "conventions": [string], "terms": [{"name": string, "meaning": string}]}
+{"title": string, "summary": string (one or two sentences), "howItWorks": string, "components": [{"id": string, "role": string, "keyFiles": [{"path": string, "symbol": string, "startLine"?: number, "endLine"?: number, "why": string}]}], "conventions": [string], "terms": [{"name": string, "meaning": string}]}
 `;
 	return `${task}\n${packFiles(files, budget - task.length - 1000)}`;
 }
@@ -923,7 +1062,7 @@ export function buildBehaviorPrompt(map: SystemMap, files: FolderFile[], budget 
 	const task = `${mapContext(map)}
 
 Describe how this project behaves, for an architecture document read by a developer new to it. Use real names from the code.
-- "useCases": the 2-5 main things someone does with it (a command, a request, a screen, a scheduled job). For each: "name" (short), "who" (the user, another system, a timer…), "steps" (3-7 short plain sentences, in order, naming the parts above), "sequence", and "files": where it enters and the key code (paths exactly as written after ---, with line ranges).
+- "useCases": the 2-5 main things someone does with it (a command, a request, a screen, a scheduled job). For each: "name" (short), "who" (the user, another system, a timer…), "steps" (3-7 short plain sentences, in order, naming the parts above), "sequence", and "files": where it enters and the key code (paths exactly as written after ---). Give each a "symbol": the exact text of the line where that code starts, copied from the file (a function signature or route line), so it can be found; line numbers are optional. Use a different file entry for each use case's own code.
   The "sequence" diagram: "nodes" = the participants left to right (the person or caller first, then the parts or key functions, by their real names, 3-6 of them), "edges" = every message in time order: {"from", "to", "label" (the real call, route or event, e.g. "POST /api/tasks", "listTasks()"), "reply"?: true for responses}. Include the important alternative paths too (an error, a cache hit, a limit reached): give those messages "branch": a short condition like "over the limit" or "invalid input"; consecutive messages with the same branch are drawn inside one frame.
 - "states": 1-3 lifecycles the code manages: a status field or enum, a mode, a connection, a job, a request, a screen. If there is no explicit status, use the closest real lifecycle (e.g. a request from received to answered) and say so in "what". For each: "name", "what" (1-2 sentences, naming the field or code that holds and changes the state), and "diagram":
   "nodes" = the states, by the names the code uses (enum values, status strings), initial state first, each with a 2-6 word "detail" saying what is true in it; include the end states (done, failed, closed) where the lifecycle ends.
@@ -931,7 +1070,7 @@ Describe how this project behaves, for an architecture document read by a develo
 Every use case MUST have its sequence diagram and there MUST be at least one state diagram.
 
 Reply with ONLY JSON:
-{"useCases": [{"name": string, "who": string, "steps": [string], "sequence": {"nodes": [{"id": string, "label": string, "detail"?: string}], "edges": [{"from": id, "to": id, "label": string, "reply"?: boolean, "branch"?: string}]}, "files": [{"path": string, "startLine"?: number, "endLine"?: number, "why"?: string}]}], "states": [{"name": string, "what": string, "diagram": {"nodes": [{"id": string, "label": string, "detail": string}], "edges": [{"from": id, "to": id, "label": string}]}}]}
+{"useCases": [{"name": string, "who": string, "steps": [string], "sequence": {"nodes": [{"id": string, "label": string, "detail"?: string}], "edges": [{"from": id, "to": id, "label": string, "reply"?: boolean, "branch"?: string}]}, "files": [{"path": string, "symbol": string, "startLine"?: number, "endLine"?: number, "why"?: string}]}], "states": [{"name": string, "what": string, "diagram": {"nodes": [{"id": string, "label": string, "detail": string}], "edges": [{"from": id, "to": id, "label": string}]}}]}
 `;
 	return `${task}\n${packFiles(files, budget - task.length - 1000)}`;
 }
@@ -1020,4 +1159,284 @@ export function repairBehavior(draft: any, known: readonly string[]): { value?: 
 	if (useCases.length < 2) errors.push('"useCases" needs at least 2 use cases, each with a "sequence" diagram (nodes = participants, edges = messages in order)');
 	if (!states.length) errors.push('"states" needs at least 1 lifecycle with a state "diagram" (nodes = states, edges = transitions); use the closest real lifecycle if there is no status field');
 	return { value: useCases.length || states.length ? { useCases, states } : undefined, errors };
+}
+
+// ---------------------------------------------------------------------------
+// Security scan: weaknesses found in the code, each with why it matters, a fix and a test
+
+export type Severity = 'critical' | 'high' | 'medium' | 'low';
+export const SEVERITIES: readonly Severity[] = ['critical', 'high', 'medium', 'low'];
+export interface Finding {
+	id: string; severity: Severity; category: string; cwe?: string; title: string;
+	file: string; startLine: number; endLine: number;
+	why: string; exploit: string; fix: string; fixCode?: string; testCode?: string;
+	/** Found by a fast rule (and confirmed by the model, or not checked), by the model alone, or in a dependency advisory. */
+	source?: 'rule' | 'model' | 'dependency';
+	rule?: string; confirmed?: boolean;
+	/** OWASP Top 10 code (A01…A10), or MEM for memory safety. */
+	owasp?: string;
+	/** Why this severity, how to check it yourself, and the attack as a sequence diagram. */
+	severityWhy?: string; verify?: string; attack?: Diagram;
+	url?: string;
+}
+/** A rule hit the model looked at and judged not to be a problem, kept so the reader can see why. */
+export interface Rejected { hit: string; title: string; file: string; line: number; reason: string }
+export interface SecurityReport { summary: string; findings: Finding[]; rejected?: Rejected[]; deps?: string[] }
+
+const SECURITY_ROLE = 'You are a careful application security reviewer. You find real weaknesses in code and say how to fix them, so that a developer who is not a security expert understands them. You never invent a problem.';
+
+/** What a rule found, as the model sees it. */
+export interface HitRef { id: string; rule: string; title: string; file: string; line: number; text: string; cwe: string; owasp: string; severity: Severity; why: string; fix: string }
+
+export function buildSecurityPrompt(files: FolderFile[], scope: string, budget = 1e9, hits: readonly HitRef[] = []): string {
+	const flagged = hits.length ? `
+Fast pattern checks flagged these lines. For EACH one decide whether it is a real problem in this code:
+- real: report it as a finding with "hit" set to its id (you may change the severity, and explain it better);
+- not real (test code, a constant, already validated, unreachable): list it in "rejected" with its id and a one-sentence reason.
+${hits.map(h => `[${h.id}] ${h.file}:${h.line} ${h.title} (${h.cwe}): ${h.text}`).join('\n')}
+` : '';
+	const task = `${SECURITY_ROLE}
+${GUIDE}
+
+Review ${scope} for security weaknesses.${flagged}
+Then look for what patterns can't see, by following data from where it enters (requests, files, environment, messages) to where it is used:
+- missing or broken authentication and authorization: routes anyone can call, no ownership check on an id from the request (IDOR), privilege checks done only in the client
+- injection through variables and helpers (SQL, shell, eval, templates, HTML), server-side request forgery, open redirects, path traversal
+- mass assignment (the request body copied into a record), prototype pollution, race conditions, missing rate limits or size limits, unsafe uploads
+- memory safety in C/C++/unsafe Rust: buffer and integer overflow, out-of-bounds, use after free, format strings
+- secrets in config, weak crypto, disabled TLS checks, insecure defaults, sensitive data in logs or error messages
+
+Rules:
+- Report ONLY what you can point at in the code shown: a file and the exact lines. No guesses about code you can't see, no generic advice, no style comments. If there is no real problem, return an empty list.
+- Never copy a secret in full: show its first 4 characters then "…".
+- Write for a developer who is not a security expert: plain words, concrete, no jargon without saying what it means.
+- "severity": critical (exploitable now, by anyone, with big impact: remote code execution, a leaked live secret), high, medium, low. "severityWhy": one sentence on why that level (who can reach it, what they gain).
+- "why": what is wrong and what it puts at risk. "exploit": how someone would actually abuse it, with an example request or input. "verify": how the reader can check it themselves (a request to send, a test to run).
+- "attack": a sequence diagram of the attack: nodes = "Attacker" first, then the entry point and the functions the data passes through by their real names, then the sink; edges = the steps, the first carrying the malicious input.
+- "fix": what to change, in plain words. "fixCode": the corrected code for exactly those lines, ready to paste, in the project's style. "testCode": a small test that fails on the vulnerable code and passes on the fixed code, in the project's test framework (else the language's standard one).
+- "owasp": the OWASP Top 10 2021 code ("A01" … "A10"), or "MEM" for memory safety. "cwe": e.g. "CWE-89".
+- "symbol": the exact text of the line where the problem starts, copied from the file; "startLine"/"endLine" use the line numbers shown.
+- At most 25 findings, most severe first. Merge repeats of the same problem into one finding that names the other places.
+
+Reply with ONLY JSON:
+{"summary": string (one or two sentences on the overall state), "findings": [{"hit"?: string, "severity": "critical"|"high"|"medium"|"low", "severityWhy": string, "category": string (e.g. "SQL injection"), "owasp": string, "cwe"?: string, "title": string (short), "file": string (exactly as written after ---), "symbol": string, "startLine": number, "endLine": number, "why": string, "exploit": string, "verify": string, "attack": {"nodes": [{"id": string, "label": string}], "edges": [{"from": id, "to": id, "label": string}]}, "fix": string, "fixCode"?: string, "testCode"?: string}], "rejected": [{"id": string, "reason": string}]}
+`;
+	// ponytail: whole files only (an outline hides the bug); the host batches files to fit, and what still doesn't fit at this budget is left out
+	let room = budget - task.length - 500;
+	const shown: string[] = [];
+	for (const f of files) {
+		const part = `--- ${f.path}\n${numberLines(f.text).join('\n')}`;
+		if (part.length > room) break;
+		shown.push(part);
+		room -= part.length;
+	}
+	return `${task}\n${shown.join('\n\n')}`;
+}
+
+const order = (p: Finding, q: Finding) => SEVERITIES.indexOf(p.severity) - SEVERITIES.indexOf(q.severity) || p.file.localeCompare(q.file) || p.startLine - q.startLine;
+const renumber = (list: Finding[]) => list.map((f, i) => ({ ...f, id: `f${i + 1}` }));
+
+/**
+ * Findings as the page shows them: paths and lines checked against the files, text capped, repeats merged, worst first.
+ * Rule hits the model didn't mention are kept as unconfirmed rule findings: a pattern match is still worth a look.
+ */
+export function repairSecurity(draft: any, files: readonly FolderFile[], hits: readonly HitRef[] = []): { value?: SecurityReport; errors: string[] } {
+	if (!draft || typeof draft !== 'object') return { errors: ['Reply is not a JSON object'] };
+	if (!Array.isArray(draft.findings)) return { errors: ['"findings" must be an array (empty if there is nothing to report)'] };
+	const known = files.map(f => f.path);
+	const byId = new Map(hits.map(h => [h.id, h]));
+	const used = new Set<string>();
+	const out: Finding[] = [];
+	const code = (v: unknown) => typeof v === 'string' ? v.replace(/^\s*\n/, '').trimEnd().slice(0, 6000) : '';
+	for (const x of draft.findings) {
+		const hit = byId.get(str(x?.hit, 300));
+		const file = resolvePath(str(x?.file, 300), known) ?? hit?.file;
+		const title = str(x?.title, 120) || hit?.title || '', why = str(x?.why, 800) || hit?.why || '';
+		if (!file || !title || !why) continue;
+		const [ref] = snapRefs([{ path: file, symbol: str(x?.symbol, 120).split('\n')[0].trim() || undefined,
+			startLine: int(x?.startLine) > 0 ? int(x?.startLine) : hit?.line, endLine: int(x?.endLine) > 0 ? int(x?.endLine) : hit?.line }], files);
+		const a = ref.startLine ?? 1, b = ref.endLine ?? a;
+		const category = str(x?.category, 60) || hit?.title || 'Security';
+		if (hit) used.add(hit.id);
+		if (out.some(o => o.file === file && o.startLine === a && o.category.toLowerCase() === category.toLowerCase())) continue;
+		const f: Finding = {
+			id: '', severity: SEVERITIES.includes(x?.severity) ? x.severity : hit?.severity ?? 'medium', category, title, file, startLine: a, endLine: Math.max(a, b),
+			why, exploit: str(x?.exploit, 600), fix: str(x?.fix, 600) || hit?.fix || '', source: hit ? 'rule' : 'model',
+		};
+		if (hit) { f.rule = hit.rule; f.confirmed = true; }
+		const cwe = (str(x?.cwe, 20) || hit?.cwe || '').match(/\d+/)?.[0];
+		if (cwe) f.cwe = `CWE-${cwe}`;
+		const owasp = str(x?.owasp, 10).toUpperCase().match(/^(A(0[1-9]|10)|MEM)/)?.[0] ?? hit?.owasp;
+		if (owasp) f.owasp = owasp;
+		for (const k of ['severityWhy', 'verify'] as const) { const v = str(x?.[k], 500); if (v) f[k] = v; }
+		const attack = repairDiagram(x?.attack && typeof x.attack === 'object' ? { ...x.attack, kind: 'sequence' } : undefined);
+		if (attack) f.attack = attack;
+		if (code(x?.fixCode)) f.fixCode = code(x.fixCode);
+		if (code(x?.testCode)) f.testCode = code(x.testCode);
+		out.push(f);
+	}
+	const rejected: Rejected[] = (Array.isArray(draft.rejected) ? draft.rejected : []).flatMap((r: any) => {
+		const h = byId.get(str(r?.id, 300));
+		if (!h || used.has(h.id)) return [];
+		used.add(h.id);
+		return [{ hit: h.id, title: h.title, file: h.file, line: h.line, reason: str(r?.reason, 300) || 'Judged not to be a problem here.' }];
+	});
+	for (const h of hits) {
+		if (used.has(h.id) || out.some(o => o.file === h.file && o.startLine <= h.line && h.line <= o.endLine && o.cwe === h.cwe)) continue;
+		out.push(ruleFinding(h));
+	}
+	return { value: { summary: str(draft.summary, 400), findings: renumber(out.sort(order).slice(0, 40)), rejected }, errors: [] };
+}
+
+/** A rule hit on its own (no model, or the model skipped it). */
+export function ruleFinding(h: HitRef): Finding {
+	return { id: '', severity: h.severity, category: h.title, cwe: h.cwe, owasp: h.owasp, title: h.title, file: h.file, startLine: h.line, endLine: h.line,
+		why: h.why, exploit: '', fix: h.fix, source: 'rule', rule: h.rule, confirmed: false };
+}
+
+/** A dependency advisory as a finding, pointed at the line of the manifest that names the package. */
+export function depFinding(d: { name: string; version: string; file: string; id: string; title: string; severity: Severity; fixed?: string; url?: string }, line = 1): Finding {
+	return { id: '', severity: d.severity, category: 'Vulnerable dependency', owasp: 'A06', title: `${d.name} ${d.version}: ${d.title}`, file: d.file, startLine: line, endLine: line,
+		why: `This version of ${d.name} has a published vulnerability (${d.id}). Your code doesn't need to call the vulnerable part for it to matter if an attacker can reach it through the library.`,
+		exploit: '', fix: d.fixed ? `Upgrade ${d.name} to ${d.fixed} or later, then run your tests.` : `No fixed version is listed yet. Check the advisory for a workaround, or replace ${d.name}.`,
+		source: 'dependency', url: d.url };
+}
+
+/** One report from several (one per batch of files): findings together, repeats dropped, worst first. */
+export function mergeReports(reports: readonly SecurityReport[]): SecurityReport {
+	const seen = new Set<string>();
+	const findings = reports.flatMap(r => r.findings).filter(f => {
+		const key = `${f.file}:${f.startLine}:${f.category.toLowerCase()}`;
+		return seen.has(key) ? false : (seen.add(key), true);
+	}).sort(order);
+	return { summary: reports.map(r => r.summary).find(Boolean) ?? '', findings: renumber(findings), rejected: reports.flatMap(r => r.rejected ?? []), deps: reports.flatMap(r => r.deps ?? []) };
+}
+
+/** SARIF 2.1.0, for GitHub code scanning and other tools. */
+export function toSarif(r: SecurityReport, tool = 'coee'): object {
+	const rules = new Map<string, Finding>();
+	for (const f of r.findings) rules.set(f.rule ?? f.cwe ?? f.category, f);
+	const level = (s: Severity) => s === 'critical' || s === 'high' ? 'error' : s === 'medium' ? 'warning' : 'note';
+	return {
+		version: '2.1.0', $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+		runs: [{
+			tool: { driver: { name: tool, rules: [...rules].map(([id, f]) => ({ id, name: f.category, shortDescription: { text: f.title }, properties: { tags: [f.cwe, f.owasp].filter(Boolean) } })) } },
+			results: r.findings.map(f => ({ ruleId: f.rule ?? f.cwe ?? f.category, level: level(f.severity), message: { text: `${f.title}. ${f.why}` },
+				locations: [{ physicalLocation: { artifactLocation: { uri: f.file }, region: { startLine: f.startLine, endLine: f.endLine } } }] })),
+		}],
+	};
+}
+
+/** Split files into batches of at most `chars` characters each (a file bigger than that gets a batch of its own). */
+export function batchFiles(files: readonly FolderFile[], chars: number): FolderFile[][] {
+	const out: FolderFile[][] = [];
+	let used = 0;
+	for (const f of files) {
+		if (!out.length || used + f.text.length > chars) { out.push([]); used = 0; }
+		out[out.length - 1].push(f);
+		used += f.text.length;
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------------
+// Changes: a code review of one changed file, as structured findings that land on its lines
+
+export type FindingKind = 'bug' | 'security' | 'performance' | 'test' | 'maintainability';
+export const KINDS: readonly FindingKind[] = ['bug', 'security', 'performance', 'test', 'maintainability'];
+export interface ReviewFinding {
+	id: string; file: string; startLine: number; endLine: number;
+	severity: Severity; kind: FindingKind; title: string; why: string;
+	/** Code to apply: it replaces `find` (existing text) in the file. */
+	suggestion?: { find: string; code: string };
+	/** Found by a fast rule (no model) or in the model's review. */
+	source: 'rule' | 'model';
+	/** The text of the first line, to find it again after edits move it. */
+	anchor: string;
+}
+export interface FileReview { summary: string; risk: 'low' | 'medium' | 'high'; findings: ReviewFinding[] }
+
+export function buildChangeReviewPrompt(file: FileDiff, text: string, context: string, budget = 1e9): string {
+	const head = `You are a senior engineer reviewing a colleague's change to ${file.path} before it is committed. Find what is wrong or risky in the CHANGED lines (marked +), the way a careful human reviewer would.
+${GUIDE}
+${context ? `\n${context}\n` : ''}
+Look for, in order of importance:
+- bugs: wrong logic, off-by-one, null/undefined not handled, wrong condition, a missing await, a promise not handled, resources not closed, a changed function whose callers in this file now break
+- security: user input reaching SQL, shell, eval, HTML, file paths or URLs; missing auth or validation; secrets; unsafe defaults
+- error handling that hides failures, or leaks internals to users
+- performance problems that matter (work in a loop that could be done once, N+1 queries, unbounded growth)
+- missing tests for new behavior, when the project has tests
+- maintainability only when it will clearly cause bugs later (duplicated logic that must stay in sync, a misleading name)
+Rules:
+- Only comment on the changed lines or on code the change breaks. No style nits, no praise, no restating what the code does. If nothing is wrong, return an empty list: that is a good review.
+- Each finding: "severity" (critical, high, medium, low), "kind" (${KINDS.join(', ')}), "title" (short), "why" (what goes wrong, when, and the consequence, in 1-3 plain sentences), "symbol" (the exact text of the line it starts at, copied from the file), "startLine"/"endLine" (new-file line numbers as shown).
+- "suggestion" when a concrete fix is small: "find" is the existing lines to replace, copied EXACTLY from the file without line numbers, and "code" what replaces them. Complete code, in the file's style.
+- "risk": low (safe to commit), medium (worth a second look), high (likely to break something).
+
+Reply with ONLY JSON:
+{"summary": string (one sentence: what this change does), "risk": "low"|"medium"|"high", "findings": [{"severity": string, "kind": string, "title": string, "why": string, "symbol": string, "startLine": number, "endLine": number, "suggestion"?: {"find": string, "code": string}}]}
+
+The change (new-file line numbers; + added, - removed):
+`;
+	const room = budget - head.length - 400;
+	const diff = renderHunks(file, Math.floor(room * 0.4));
+	return `${head}${diff}\n\nThe whole file after the change:\n${packFiles([{ path: file.path, text }], room - diff.length)}`;
+}
+
+/** Lines (1-based) a change added, with `margin` lines around each run: where review comments belong. */
+export function changedRegion(f: FileDiff, margin = 3): Set<number> {
+	const out = new Set<number>();
+	for (const n of addedLines(f)) for (let k = n - margin; k <= n + margin; k++) if (k > 0) out.add(k);
+	for (const h of f.hunks) out.add(h.newStart); // a pure removal still gets a place to comment
+	return out;
+}
+
+/** The model's review of one file, checked against the file: lines snapped, comments outside the change dropped, suggestions that can't be placed dropped. */
+export function repairChangeReview(draft: any, file: FileDiff, text: string): { value?: FileReview; errors: string[] } {
+	if (!draft || typeof draft !== 'object') return { errors: ['Reply is not a JSON object'] };
+	if (!Array.isArray(draft.findings)) return { errors: ['"findings" must be an array (empty if the change looks right)'] };
+	const lines = text.split('\n'), region = changedRegion(file, 5), f = [{ path: file.path, text }];
+	const out: ReviewFinding[] = [];
+	for (const x of draft.findings) {
+		const title = str(x?.title, 120), why = str(x?.why, 700);
+		if (!title || !why) continue;
+		const [ref] = snapRefs([{ path: file.path, symbol: str(x?.symbol, 160).split('\n')[0].trim() || undefined, startLine: int(x?.startLine) > 0 ? int(x?.startLine) : undefined, endLine: int(x?.endLine) > 0 ? int(x?.endLine) : undefined }], f);
+		const a = ref.startLine ?? 0, b = Math.max(a, ref.endLine ?? a);
+		if (!a || ![...Array(b - a + 1)].some((_, k) => region.has(a + k))) continue; // not about this change
+		const r: ReviewFinding = { id: '', file: file.path, startLine: a, endLine: Math.min(b, a + 30), title, why, source: 'model',
+			severity: SEVERITIES.includes(x?.severity) ? x.severity : 'medium', kind: KINDS.includes(x?.kind) ? x.kind : 'bug', anchor: lines[a - 1]?.trim() ?? '' };
+		const find = typeof x?.suggestion?.find === 'string' ? x.suggestion.find.replace(/^\s*\n/, '').trimEnd() : '';
+		const code = typeof x?.suggestion?.code === 'string' ? x.suggestion.code.replace(/^\s*\n/, '').trimEnd().slice(0, 4000) : '';
+		if (find && code && placeSnippet(text, { file: file.path, mode: 'replace', find, code }).status === 'ready') r.suggestion = { find, code };
+		if (!out.some(o => o.startLine === r.startLine && o.title === r.title)) out.push(r);
+	}
+	out.sort((p, q) => SEVERITIES.indexOf(p.severity) - SEVERITIES.indexOf(q.severity) || p.startLine - q.startLine);
+	const risk = draft.risk === 'high' || draft.risk === 'medium' ? draft.risk : out.some(x => x.severity === 'critical' || x.severity === 'high') ? 'high' : 'low';
+	return { value: { summary: str(draft.summary, 300), risk, findings: out.slice(0, 15).map((x, i) => ({ ...x, id: `${file.path}#${i + 1}` })) }, errors: [] };
+}
+
+/** Where a finding is now, after edits: the line whose text matches its anchor, nearest to where it was; undefined if the line is gone. */
+export function relocate(f: { startLine: number; endLine: number; anchor: string }, text: string): { startLine: number; endLine: number } | undefined {
+	if (!f.anchor) return undefined;
+	const lines = text.split('\n');
+	if (lines[f.startLine - 1]?.trim() === f.anchor) return { startLine: f.startLine, endLine: f.endLine };
+	let best = -1;
+	lines.forEach((l, i) => { if (l.trim() === f.anchor && (best < 0 || Math.abs(i + 1 - f.startLine) < Math.abs(best + 1 - f.startLine))) best = i; });
+	if (best < 0) return undefined;
+	const d = best + 1 - f.startLine;
+	return { startLine: f.startLine + d, endLine: Math.min(f.endLine + d, lines.length) };
+}
+
+/** A commit message for the whole change, from its diff. */
+export function buildCommitMessagePrompt(files: FileDiff[], budget = 1e9): string {
+	const head = `Write a git commit message for this change: a subject line under 72 characters in the imperative mood ("Add", "Fix"), a blank line, then 1-3 short lines on what changed and why. Plain text only, no markdown, no quotes around it.\n\n`;
+	let room = budget - head.length - 200;
+	const parts: string[] = [];
+	for (const f of files) {
+		const d = `--- ${f.path} (${f.status})\n${renderHunks(f, Math.max(0, Math.min(room, 6000)))}`;
+		if (d.length > room) break;
+		parts.push(d);
+		room -= d.length;
+	}
+	return head + parts.join('\n\n');
 }

@@ -1,6 +1,6 @@
 # coee
 
-Understand any codebase without leaving VS Code. coee explains code step by step beside the source, describes how a project is put together, reviews changes and plans new work. It never edits your files.
+Understand any codebase without leaving VS Code. coee explains code step by step beside the source, describes how a project is put together, reviews your changes as you make them, scans for security gaps and plans new work. It only edits your files when you click **Insert** on code it proposes, and asks first.
 
 <img src="media/screenshots/walkthrough.png" alt="The architecture overview: a summary of the project, how it works, and a diagram of its components and how they connect" width="560">
 
@@ -8,13 +8,18 @@ Understand any codebase without leaving VS Code. coee explains code step by step
 
 **Walkthroughs.** Click **Explain** above any function or class, or use the book icon to explain a whole file. Each step highlights the relevant lines and explains them in plain language, with a flow, sequence or state diagram where a picture helps. On any step you can ask for a **Simpler** or **Deeper** explanation, go **Line by line**, or ask your own question.
 
-**Architecture overview.** One page that describes the project: how it works, every component and how they connect, the main use cases with sequence diagrams, lifecycles as state diagrams, and the data model as an ER diagram.
+**Architecture overview.** coee's home page, describing the project: how it works, every component and how they connect, the main use cases with sequence diagrams, lifecycles as state diagrams, and the data model as an ER diagram. It is the hub: **Walk me through** on any component or use case starts a step-by-step walkthrough in the editor, and as you move through the steps the page highlights the part you are reading. Clicking a file link opens exactly those lines. **Find** answers "where is X handled?" with links into the code. Big repositories (over 400 source files, or with workspace packages) start at the package level: each package, what it does and which packages it uses. Open one to see its own components, use cases, states and data.
 
-**System map.** The project's components and what passes between them. Select a part to see its code and connections, ask about it, or open it in the architecture overview.
+**Changes.** coee watches your git repository and reviews what you change, without being asked. Fast checks run on every save; the model reviews each changed file when you stage it (or on save, or only on request: `coee.changes.autoReview`). Findings appear as comments on the changed lines, in the Problems panel and in the status bar, each with **Apply suggestion** (previewed first), **Dismiss**, and a reply box to ask about it. The Changes page shows a verdict ("2 things to fix before you commit"), every changed file and its review, a suggested commit message, and **Walk me through it** for a step-by-step explanation. You can also compare your branch with main or look at any commit.
 
-**Review changes.** Explain staged changes before you commit (with a suggested commit message), any commit, your branch compared with main, or a GitHub pull request. Each review covers what changed and what is worth checking, with additions and removals marked in the code.
+**Plan a change.** Describe a feature or technology you want to introduce. coee identifies the integration points, the affected components, the risks and a sensible order of work, against your real code. It includes the code to add, and always the tests. Each snippet is placed by the code around it, not by line numbers: **Add…** shows the file before and after, adds it when you agree, then checks that it landed in the right place and whether the file got new errors. Code that's already there shows as **Added ✓**, so nothing is added twice.
 
-**Plan a change.** Describe a feature or technology you want to introduce. coee identifies the integration points, the affected components, the risks and a sensible order of work, against your real code.
+**Security scan.** Scan a file, a folder or the whole project in three passes:
+- **Fast rules, no model:** 39 checks for hardcoded secrets (AWS, GitHub, Stripe and other key formats, passwords, connection strings), injection (SQL, shell, `eval`), XSS, path traversal, SSRF, open redirects, unsafe deserialization, buffer overflows in C/C++, weak crypto and randomness, disabled TLS checks and insecure configuration.
+- **Dependency advisories:** from `npm audit` or `pip-audit` when installed, otherwise from OSV.dev.
+- **The model:** confirms or rejects each rule hit in context, and finds what patterns can't see, such as missing authorization, IDOR and logic flaws.
+
+Findings are grouped by OWASP Top 10 category, with a short explanation of each. Each finding shows what's wrong, why it has that severity, how it could be abused, the attack as a sequence diagram, how to check it yourself, a fix you can apply (previewed) and a test that catches it. Findings also appear in the Problems panel with a quick fix. **Not a problem** remembers false positives, and **Export SARIF** saves the results for GitHub code scanning. It is a review aid, not a guarantee.
 
 ## Getting started
 
@@ -23,9 +28,9 @@ Understand any codebase without leaving VS Code. coee explains code step by step
 
 | Where | What you can do |
 |---|---|
-| Editor, right-click → **coee** | Explain lines or a file, ask a question, plan a change, open the architecture overview or system map, review changes |
-| Explorer, right-click → **coee** | Explain a file or folder, plan a change, open the architecture overview or system map |
-| Source Control title bar | Review before commit, review changes |
+| Editor, right-click → **coee** | Explain lines or a file, ask a question, plan a change, open the architecture overview, scan for security gaps, open Changes |
+| Explorer, right-click → **coee** | Explain a file or folder, plan a change, open the architecture overview, scan a file or folder for security gaps |
+| Source Control title bar | Open Changes, explain a commit |
 | Source Control Graph, right-click a commit | Explain a commit |
 
 ## Settings
@@ -33,16 +38,25 @@ Understand any codebase without leaving VS Code. coee explains code step by step
 | Setting | Default | Description |
 |---|---|---|
 | `coee.codeLens` | `true` | Show **Explain** above functions, methods and classes |
+| `coee.changes.autoReview` | `onStage` | When Changes asks the model to review a changed file: `onStage`, `onSave` or `off`. Fast checks always run |
 | `coee.cache` | `true` | Keep finished explanations so reopening is instant. The setting includes a **Clear cache** link |
 | `coee.modelFamily` | | Preferred chat model, for example `gpt-4o`. Empty uses the first available model |
 
 ## Privacy
 
-coee sends the code it explains to the chat model selected in VS Code, through the VS Code Language Model API. It does not need its own API key and never modifies your files. Pull requests are read with your own GitHub CLI (`gh`) sign-in.
+coee sends code to the chat model selected in VS Code, through the VS Code Language Model API. It needs no API key of its own:
+- **Explanations, plans and the architecture page** send the code they explain.
+- **Changes** sends each changed file and its diff.
+- **The security scan** sends the files it scans, configuration files included. Don't scan folders that hold secrets you wouldn't share with the model.
+
+The dependency check sends only package names and versions to OSV.dev, and only when `npm audit` or `pip-audit` isn't available.
+
+coee changes your files only when you click **Add** or **Apply** and confirm. In a folder you haven't trusted, it doesn't run git or audit tools, because a repository's own configuration can make them run programs.
 
 ## Development
 
 ```sh
-npm install && npm test   # build and run the tests
+npm install && npm test   # build and run the unit tests
+npm run test:integration  # run the extension in a real VS Code (downloads VS Code once)
 npm run package           # create coee-x.y.z.vsix
 ```

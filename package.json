@@ -1,7 +1,7 @@
 {
   "name": "coee",
   "displayName": "coee",
-  "description": "Understand any codebase in VS Code: step-by-step walkthroughs beside the code, an architecture overview with diagrams, a system map, change reviews and change planning. Explains only; never edits.",
+  "description": "Understand any codebase in VS Code: an architecture overview as the hub, step-by-step walkthroughs beside the code, a live review of your git changes, a security scan, and change planning with code and tests. Edits your files only when you click Add and confirm.",
   "version": "1.0.0",
   "publisher": "coee",
   "license": "MIT",
@@ -11,13 +11,15 @@
     "theme": "light"
   },
   "keywords": [
-    "explain",
-    "code explanation",
-    "walkthrough",
-    "system map",
     "architecture",
+    "code explanation",
+    "code review",
+    "copilot",
+    "explain",
     "learning",
-    "copilot"
+    "owasp",
+    "security",
+    "walkthrough"
   ],
   "engines": {
     "vscode": "^1.95.0"
@@ -33,7 +35,8 @@
   ],
   "capabilities": {
     "untrustedWorkspaces": {
-      "supported": true
+      "supported": "limited",
+      "description": "In a folder you haven't trusted, coee still explains code and runs its pattern checks, but doesn't run git (Changes, reviews) or npm audit / pip-audit, because a repository's own config can make them run programs."
     },
     "virtualWorkspaces": true
   },
@@ -42,11 +45,15 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test \"out/test/*.test.js\"",
-    "package": "npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links"
+    "package": "npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links",
+    "test:integration": "npm run compile && vscode-test"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.0.0",
     "@types/vscode": "~1.95.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
     "typescript": "^5.6.0"
   },
   "contributes": {
@@ -88,10 +95,10 @@
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "coee.map",
-        "title": "Open system map",
+        "command": "coee.security",
+        "title": "Security scan…",
         "category": "coee",
-        "icon": "$(type-hierarchy)"
+        "icon": "$(shield)"
       },
       {
         "command": "coee.prev",
@@ -140,16 +147,33 @@
         "icon": "$(trash)"
       },
       {
-        "command": "coee.review",
-        "title": "Review changes…",
-        "category": "coee",
-        "icon": "$(git-compare)"
-      },
-      {
-        "command": "coee.reviewStaged",
-        "title": "Review before commit",
+        "command": "coee.changes",
+        "title": "Changes: live review",
         "category": "coee",
         "icon": "$(checklist)"
+      },
+      {
+        "command": "coee.exportSarif",
+        "title": "Export security findings as SARIF…",
+        "category": "coee",
+        "icon": "$(export)"
+      },
+      {
+        "command": "coee.changesApply",
+        "title": "Apply suggestion",
+        "category": "coee",
+        "icon": "$(check)"
+      },
+      {
+        "command": "coee.changesDismiss",
+        "title": "Dismiss",
+        "category": "coee",
+        "icon": "$(close)"
+      },
+      {
+        "command": "coee.changesAsk",
+        "title": "Ask coee",
+        "category": "coee"
       },
       {
         "command": "coee.reviewCommit",
@@ -172,6 +196,18 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "coee.changesApply",
+          "when": "false"
+        },
+        {
+          "command": "coee.changesDismiss",
+          "when": "false"
+        },
+        {
+          "command": "coee.changesAsk",
+          "when": "false"
+        },
         {
           "command": "coee.explain",
           "when": "editorIsOpen"
@@ -253,16 +289,12 @@
           "group": "2_project@3"
         },
         {
-          "command": "coee.map",
+          "command": "coee.security",
           "group": "2_project@4"
         },
         {
-          "command": "coee.review",
+          "command": "coee.changes",
           "group": "3_changes@1"
-        },
-        {
-          "command": "coee.reviewStaged",
-          "group": "3_changes@2"
         },
         {
           "command": "coee.recent",
@@ -291,31 +323,44 @@
           "group": "2_project@1"
         },
         {
-          "command": "coee.map",
-          "when": "explorerResourceIsFolder",
+          "command": "coee.security",
           "group": "2_project@2"
         },
         {
-          "command": "coee.review",
+          "command": "coee.changes",
           "when": "explorerResourceIsFolder",
           "group": "3_changes@1"
         }
       ],
       "scm/title": [
         {
-          "command": "coee.reviewStaged",
+          "command": "coee.changes",
           "when": "scmProvider == git",
           "group": "navigation@90"
-        },
-        {
-          "command": "coee.review",
-          "when": "scmProvider == git",
-          "group": "navigation@91"
         },
         {
           "command": "coee.reviewCommit",
           "when": "scmProvider == git",
           "group": "1_coee@1"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "coee.changesApply",
+          "when": "commentController == coee && comment == coee-fix",
+          "group": "inline@1"
+        },
+        {
+          "command": "coee.changesDismiss",
+          "when": "commentController == coee && comment =~ /^coee/",
+          "group": "inline@2"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "coee.changesAsk",
+          "when": "commentController == coee",
+          "group": "inline@1"
         }
       ],
       "scm/historyItem/context": [
@@ -357,6 +402,22 @@
           "default": true,
           "order": 0,
           "description": "Show an Explain link above each function, method and class."
+        },
+        "coee.changes.autoReview": {
+          "type": "string",
+          "enum": [
+            "onStage",
+            "onSave",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Review a file with the model when you stage it (fast pattern checks run on every save).",
+            "Review each changed file with the model when you save it.",
+            "Only fast pattern checks run on their own; the model reviews when you click Review."
+          ],
+          "default": "onStage",
+          "order": 4,
+          "description": "When the Changes view asks the chat model to review your uncommitted changes."
         },
         "coee.cache": {
           "type": "boolean",

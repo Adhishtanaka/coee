@@ -3,12 +3,13 @@ import * as path from 'path';
 import { createHash } from 'crypto';
 import {
 	CodeContext, Diagram, FolderFile, HelpMode, Scene, SystemMap, Turn, Walkthrough, buildAskPrompt, buildExplainPrompt, buildMorePrompt, buildTourOverviewPrompt,
-	buildPlanPickPrompt, buildPlanPrompt, buildReviewPrompt, buildTourPartPrompt, buildTourUseCasesPrompt, withMapDiagram, endLine, packChapters, repair, repairPick, isTestFile,
+	buildPlanPickPrompt, buildPlanPrompt, buildReviewPrompt, buildTourPartPrompt, buildTourUseCasesPrompt, withMapDiagram, endLine, packChapters, repair, repairPick, repairPlan, placeSnippet, isTestFile,
 } from './prompt';
 import { Lm, Prompt, isCancel, log } from './lm';
 import { diagramSvg } from './layout';
 import { MANIFEST, MapController, pickProject, read, sourceFiles } from './map';
-import { page } from './ui';
+import { codeColumn, createPanel, page } from './ui';
+import { addCode, fileText } from './apply';
 import { Review, ReviewFile, ReviewTarget, collect, openDiff, pickReview, repoRoot, useCommitMessage } from './git';
 
 const MAX_LINES = 3000; // ponytail: whole files fit; beyond this select a part
@@ -24,6 +25,9 @@ const RECENT_KEY = 'coee.recent';
 interface Recent { id: string; label: string; sub: string; kind: 'range' | 'folder' | 'tour' | 'plan' | 'review'; uri: string; start?: number; end?: number; question?: string; target?: ReviewTarget; t: number }
 const SHORTCUT = process.platform === 'darwin' ? '⌘⌥E' : 'Ctrl+Alt+E';
 const IMPORT = /^\s*(import\b|from\s+\S+\s+import\b|#include\b|using\b|use\b|package\b|require\b)|\brequire\(/;
+
+/** One part of a project to walk through: a component of the map, or a use case from the architecture page. */
+export type TourPart = { id: string } | { name: string; steps: string[]; files: string[] };
 
 type Part = { q?: boolean; text: string };
 type ViewScene = Scene & { svg?: string; failed?: boolean };
@@ -58,6 +62,8 @@ interface ViewState {
 	code?: CodeView;
 	/** Show the intro (what you'll learn, words you'll meet) before step 1. */
 	intro?: boolean;
+	/** Plans: where each snippet ("scene:index") stands in the files now. */
+	snippets?: Record<string, { status: 'ready' | 'added' | 'error'; reason?: string }>;
 }
 
 interface CodeView {
@@ -113,6 +119,7 @@ export class WalkthroughController implements vscode.Disposable {
 	private readonly cache = new Map<string, Walkthrough>();
 	private readonly svgs = new Map<string, string>(); // diagram + theme → SVG
 	private flushTimer?: NodeJS.Timeout;
+	private snipTimer?: NodeJS.Timeout;
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly highlight = vscode.window.createTextEditorDecorationType({
 		backgroundColor: new vscode.ThemeColor('coee.highlightBackground'),
@@ -128,6 +135,12 @@ export class WalkthroughController implements vscode.Disposable {
 		this.disposables.push(
 			this.highlight,
 			vscode.workspace.onDidChangeTextDocument(e => {
+				// A plan watches its snippets instead: code added (by coee or by hand) shows as added, not as a stale plan.
+				if (this.session?.plan && e.contentChanges.length && this.inSession(e.document.uri)) {
+					clearTimeout(this.snipTimer);
+					this.snipTimer = setTimeout(() => void this.refreshSnippets(), 400);
+					return;
+				}
 				if (this.session && !this.state.stale && e.contentChanges.length && this.inSession(e.document.uri)) {
 					this.state.stale = true;
 					this.push();
@@ -156,17 +169,23 @@ export class WalkthroughController implements vscode.Disposable {
 	}
 
 	/** Open the tab beside the code, or bring it forward. */
+	/** Bring the walkthrough page back; false if there's nothing to show. */
+	show(): boolean {
+		if (!this.panel) return false;
+		this.panel.reveal(this.panel.viewColumn, false);
+		return true;
+	}
+
 	private openPanel() {
-		if (this.panel) return this.panel.reveal(undefined, true);
-		const panel = this.panel = vscode.window.createWebviewPanel('coee.walkthroughPanel', 'Walkthrough',
-			{ viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }, { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] });
+		if (this.panel) return this.panel.reveal(this.panel.viewColumn, true);
+		const panel = this.panel = createPanel('coee.walkthroughPanel', 'Walkthrough', { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] });
 		panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png');
 		this.setup(panel.webview);
 		// Closing the tab ends the walkthrough.
 		panel.onDidDispose(() => { if (this.panel === panel) { this.panel = undefined; this.close(); } });
 	}
 
-	private async onMessage(m: { type: string; i?: number; text?: string; part?: number; mode?: string; id?: string }) {
+	private async onMessage(m: { type: string; to?: string; i?: number; n?: number; text?: string; part?: number; mode?: string; act?: string; id?: string }) {
 		switch (m.type) {
 			case 'ready': return this.flush();
 			case 'go': return this.go(m.i ?? 0);
@@ -188,6 +207,8 @@ export class WalkthroughController implements vscode.Disposable {
 				const r = this.session?.review, msg = this.state.w?.commitMessage;
 				return r && msg ? useCommitMessage(r.target, msg) : undefined;
 			}
+			case 'snippet': return this.snippet(m.i ?? -1, m.n ?? -1, m.act === 'insert');
+			case 'nav': return vscode.commands.executeCommand('coee.go', m.to, this.session?.uri);
 			case 'bigDiagram': return this.bigDiagram();
 			case 'close': return this.close();
 			case 'switch': {
@@ -236,7 +257,7 @@ export class WalkthroughController implements vscode.Disposable {
 		const r = this.session?.review;
 		const review = r && { note: r.target.note, stats: Object.fromEntries([...r.files].map(([p, f]) => [p, `${f.diff.status === 'added' ? 'new · ' : ''}+${f.plus} −${f.minus}`])) };
 		if (this.panel) {
-			this.panel.webview.postMessage({ type: 'state', state: { ...withSvg(1000), switchable, review } });
+			this.panel.webview.postMessage({ type: 'state', state: { ...withSvg(1000), switchable, review, isPlan: !!this.session?.plan } });
 			const title = w?.title ?? this.state.heading ?? 'Walkthrough';
 			this.panel.title = title.length > 40 ? title.slice(0, 39) + '…' : title;
 		}
@@ -375,7 +396,7 @@ export class WalkthroughController implements vscode.Disposable {
 		const stat = await vscode.workspace.fs.stat(uri);
 		if (stat.type & vscode.FileType.Directory) return this.explainFolder(uri);
 		const doc = await vscode.workspace.openTextDocument(uri);
-		await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true });
+		await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true, viewColumn: codeColumn() });
 		await this.explainRange(doc, new vscode.Range(0, 0, doc.lineCount - 1, 0));
 	}
 
@@ -388,12 +409,12 @@ export class WalkthroughController implements vscode.Disposable {
 	 * The codebase tour: an overview of the whole system, then one part per component of the system map,
 	 * each explained from that component's own code.
 	 */
-	async tour(root?: vscode.Uri) {
+	async tour(root?: vscode.Uri, only?: TourPart) {
 		root ??= await pickProject('Explain which codebase?');
 		if (!root) return;
 		const gen = this.restart();
 		const name = path.basename(root.path);
-		this.state = fresh({ status: 'loading', heading: `Touring ${name}`, source: `${name}/`, busy: true, reading: 'the system map' });
+		this.state = fresh({ status: 'loading', heading: `Touring ${name}`, source: `${name}/`, busy: true, reading: 'the project\'s parts' });
 		this.flush();
 		this.openPanel();
 		let map: SystemMap;
@@ -406,7 +427,11 @@ export class WalkthroughController implements vscode.Disposable {
 		}
 		if (gen !== this.gen) return;
 		const all = await sourceFiles(root);
-		const components = map.components.filter(c => c.files.length).slice(0, TOUR_PARTS);
+		// One part only (from the architecture page): a component by id, or a use case, walked like a part.
+		const one = only && ('id' in only ? map.components.find(c => c.id === only.id) : { id: `use-case:${only.name}`, name: only.name, summary: only.steps.join(' → '), files: only.files.map(path => ({ path })) });
+		const components = one ? [one] : map.components.filter(c => c.files.length).slice(0, TOUR_PARTS);
+		if (only && !one) throw new Error('That part is no longer in the project map. Regenerate the architecture page.');
+		if (one && !one.files.length) throw new Error(`${one.name} has no files to walk through.`);
 		const { overviewPaths, wanted } = projectFiles(all, components);
 		const { files, lines } = await readFiles(root, wanted, TOUR_CHARS);
 		if (gen !== this.gen) return;
@@ -414,11 +439,13 @@ export class WalkthroughController implements vscode.Disposable {
 		const pick = (paths: string[]) => paths.map(p => byPath.get(p)).filter((f): f is FolderFile => !!f);
 		const first = (paths: string[]) => ({ file: paths[0], startLine: 1, endLine: 1 });
 		const jobs: Job[] = [
+			...(one ? [] : [
 			{ where: { ...first(overviewPaths), what: 'the overview' }, run: async () => withMapDiagram(await this.cached({ tour: root!.toString(), map, overview: true, code: digest(pick(overviewPaths)) }, () =>
 				this.reader.json<Walkthrough>(b => buildTourOverviewPrompt(map, pick(overviewPaths), b), d => repair(d, 1, 1, lines))), map) },
 			// Use cases see the entry points first, then each part's own files; the budget decides how much fits.
 			{ where: { ...first(overviewPaths), what: 'the use cases' }, run: (earlier: string[]) => this.cached({ tour: root!.toString(), map, useCases: true, earlier, code: digest(pick(wanted)) }, () =>
 				this.reader.json<Walkthrough>(b => buildTourUseCasesPrompt(map, pick(wanted), b), d => repair(d, 1, 1, lines))) },
+			]),
 			...components.map(c => ({
 				where: { ...first(c.files.map(f => f.path)), what: c.name },
 				run: (earlier: string[]) => this.cached({ tour: root!.toString(), map, c: c.id, earlier, code: digest(pick(c.files.map(f => f.path))) }, () =>
@@ -426,7 +453,7 @@ export class WalkthroughController implements vscode.Disposable {
 			})),
 		];
 		this.session = { uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, wanted), jobs, switchable: true };
-		await this.runJobs(gen, `Touring ${name}`, `${map.title} · ${components.length} parts`, ['Overview', 'Use cases', ...components.map(c => c.name)]);
+		await this.runJobs(gen, one ? `Walking through ${one.name}` : `Touring ${name}`, `${map.title} · ${one ? one.name : `${components.length} parts`}`, [...one ? [] : ['Overview', 'Use cases'], ...components.map(c => c.name)]);
 	}
 
 	private diagramPanel?: vscode.WebviewPanel;
@@ -439,7 +466,7 @@ export class WalkthroughController implements vscode.Disposable {
 		const svg = diagramSvg(s.diagram, theme, 4000).svg;
 		const caption = [s.diagram.illustrative ? 'Illustrative model' : '', s.diagram.caption ?? ''].filter(Boolean).join(' · ');
 		if (!this.diagramPanel) {
-			const panel = this.diagramPanel = vscode.window.createWebviewPanel('coee.diagram', 'Diagram', { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }, { localResourceRoots: [] });
+			const panel = this.diagramPanel = createPanel('coee.diagram', 'Diagram', { localResourceRoots: [] });
 			panel.onDidDispose(() => { if (this.diagramPanel === panel) this.diagramPanel = undefined; });
 		}
 		this.diagramPanel.title = `Diagram · ${s.title}`;
@@ -448,7 +475,7 @@ export class WalkthroughController implements vscode.Disposable {
 			body: `<h2>${escapeHtml(s.title)}</h2><div class="pic">${svg}</div><p class="muted">${escapeHtml(caption)}</p>`,
 			script: '',
 		});
-		this.diagramPanel.reveal(vscode.ViewColumn.Beside, true);
+		this.diagramPanel.reveal(this.diagramPanel.viewColumn, true);
 	}
 
 	/**
@@ -497,7 +524,7 @@ export class WalkthroughController implements vscode.Disposable {
 		this.state = fresh({ status: 'planning', planDraft: draft, focusAsk: Date.now() });
 		this.openPanel();
 		this.flush();
-		this.panel?.reveal(undefined, false); // take focus so the question can be typed straight away
+		this.panel?.reveal(this.panel.viewColumn, false); // take focus so the question can be typed straight away
 	}
 
 	/**
@@ -510,7 +537,7 @@ export class WalkthroughController implements vscode.Disposable {
 		if (!root) return;
 		const gen = this.restart();
 		const name = path.basename(root.path);
-		this.state = fresh({ status: 'loading', heading: question, source: `${name}/`, busy: true, reading: 'the system map' });
+		this.state = fresh({ status: 'loading', heading: question, source: `${name}/`, busy: true, reading: 'the project\'s parts' });
 		this.flush();
 		this.openPanel();
 		let map: SystemMap, picked: { approach: string; files: string[] };
@@ -536,10 +563,11 @@ export class WalkthroughController implements vscode.Disposable {
 		if (!files.length) throw new Error('coee couldn\'t read the files this change would touch.');
 		this.session = {
 			uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, picked.files), plan: question, switchable: true,
-			jobs: [{ where: { file: files[0].path, startLine: 1, endLine: 1, what: 'the plan' }, run: () => this.cached({ plan: question, root: root!.toString(), map, approach: picked.approach, code: digest(files) }, () =>
-				this.reader.json<Walkthrough>(b => buildPlanPrompt(map, question, picked.approach, files, b), d => repair(d, 1, 1, lines))) }],
+			jobs: [{ where: { file: files[0].path, startLine: 1, endLine: 1, what: 'the plan' }, run: () => this.cached({ plan: question, v: 2, root: root!.toString(), map, approach: picked.approach, code: digest(files) }, () => // v: bump when what a saved plan holds changes (2: code and tests)
+				this.reader.json<Walkthrough>(b => buildPlanPrompt(map, question, picked.approach, files, b), d => repairPlan(d, lines, files))) }],
 		};
 		await this.runJobs(gen, question, `Change plan · ${name} · ${files.length} files`);
+		void this.refreshSnippets();
 	}
 
 	/** Explain one part; later parts are told what the earlier ones covered. */
@@ -663,7 +691,7 @@ export class WalkthroughController implements vscode.Disposable {
 		this.state = fresh({ status: 'answer', heading: 'Ask about this code', source: `${path.basename(editor.document.fileName)}:${first + 1}–${last + 1}`, focusAsk: Date.now() });
 		this.flush();
 		this.openPanel();
-		this.panel?.reveal(undefined, false); // take focus so the question box can be typed into
+		this.panel?.reveal(this.panel.viewColumn, false); // take focus so the question box can be typed into
 	}
 
 	private async ask(question: string) {
@@ -740,8 +768,7 @@ export class WalkthroughController implements vscode.Disposable {
 		let editor = this.editorFor(uri);
 		if (!editor) {
 			const doc = await vscode.workspace.openTextDocument(uri);
-			const column = this.panel?.viewColumn === vscode.ViewColumn.One ? vscode.ViewColumn.Two : vscode.ViewColumn.One;
-			editor = await vscode.window.showTextDocument(doc, { preserveFocus: true, preview: true, viewColumn: this.panel ? column : undefined });
+			editor = await vscode.window.showTextDocument(doc, { preserveFocus: true, preview: true, viewColumn: codeColumn() });
 		}
 		this.paintEditor();
 		const last = editor.document.lineCount - 1;
@@ -770,9 +797,42 @@ export class WalkthroughController implements vscode.Disposable {
 	}
 
 	/** Highlight the step's lines in any editor showing its file (the tab shows the explanation itself). */
+	/** Where each of the plan's snippets stands in the files now: ready to add, already added, or with nowhere to go. */
+	private async refreshSnippets() {
+		const w = this.state.w, root = this.session?.uri;
+		if (!w || !root || !this.session?.plan) return;
+		const out: NonNullable<ViewState['snippets']> = {};
+		for (const [k, s] of w.scenes.entries()) {
+			for (const [n, sn] of (s.snippets ?? []).entries()) {
+				const p = placeSnippet(await fileText(vscode.Uri.joinPath(root, sn.file)), sn);
+				out[`${k}:${n}`] = p.status === 'error' ? { status: 'error', reason: p.reason } : { status: p.status };
+			}
+		}
+		if (this.state.w === w) { this.state.snippets = out; this.push(); }
+	}
+
+	/** A plan's code: Copy puts it on the clipboard; Add goes through the shared preview, apply and check. */
+	private async snippet(k: number, n: number, insert: boolean) {
+		const sn = this.state.w?.scenes[k]?.snippets?.[n], root = this.session?.uri;
+		if (!sn || !root) return;
+		if (!insert) {
+			await vscode.env.clipboard.writeText(sn.code);
+			return void vscode.window.showInformationMessage(`coee: code for ${sn.file} copied.`);
+		}
+		await addCode(root, sn, "the plan's code");
+		void this.refreshSnippets();
+	}
+
+	/** Told where the walkthrough is (file and line), so the architecture page can light up that part. */
+	onStep?: (file: string, line: number) => void;
+	private stepAt = '';
+
 	private paintEditor() {
 		const { w, i, status } = this.state;
 		const s = w?.scenes[i];
+		const at = status === 'ready' && s?.file ? `${s.file}:${s.startLine}` : '';
+		if (at && at !== this.stepAt) this.onStep?.(s!.file!, s!.startLine);
+		this.stepAt = at;
 		const uri = this.session && this.sceneUri(s);
 		for (const e of vscode.window.visibleTextEditors) if (e.document.uri.toString() !== uri?.toString()) e.setDecorations(this.highlight, []);
 		const editor = uri && this.editorFor(uri);
@@ -975,9 +1035,10 @@ main { padding: 12px 14px 0; min-height: 100vh; display: flex; flex-direction: c
 
 main { padding: 20px 28px 0; }
 main:has(.walk) { padding: 0; height: 100vh; }
-.walk { display: flex; flex-direction: column; height: 100vh; background: var(--vscode-editor-background); }
+.walk { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--vscode-editor-background); }
 .pad { padding: 24px; }
-.tabbar { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background)); min-height: 34px; }
+.navrow { padding: 6px 12px; border-bottom: 1px solid var(--line); display: flex; }
+.tabbar { display: flex; flex-wrap: wrap; align-items: stretch; border-bottom: 1px solid var(--line); background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background)); min-height: 34px; }
 .ftabs { display: flex; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none; }
 .ftab { border: 0; background: none; color: var(--muted); padding: 0 14px; white-space: nowrap; border-right: 1px solid var(--line); font-size: .92em; }
 .ftab.on { color: var(--vscode-foreground); background: var(--vscode-editor-background); box-shadow: inset 0 -2px 0 var(--vscode-textLink-foreground); }
@@ -1015,6 +1076,21 @@ body.vscode-light .tk { color: #0b5cad; } body.vscode-light .ts { color: #1a7f37
 .ztitle { font-size: 1.45em; font-weight: 500; line-height: 1.3; }
 .zsub { font-size: .76em; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: -6px; }
 .zprose .md { font-size: 1.1em; line-height: 1.7; max-width: 72ch; }
+.snips { display: grid; gap: 12px; max-width: 80ch; }
+.snip { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.snhead { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px 10px; background: var(--vscode-editorWidget-background); border-bottom: 1px solid var(--line); font-size: .88em; }
+.snfile { font-family: var(--vscode-editor-font-family); font-weight: 600; }
+.snmode { color: var(--muted); flex: 1; min-width: 8em; }
+.snacts { display: flex; gap: 6px; }
+.snacts .btn { padding: 2px 10px; }
+.snacts { align-items: center; }
+.snmode code { font-family: var(--mono); margin-left: 4px; }
+.snstate { font-size: .9em; font-weight: 600; }
+.snstate.ok { color: var(--vscode-testing-iconPassed, #3fb950); }
+.snstate.bad { color: var(--vscode-editorWarning-foreground); }
+.snip.done .sncode { opacity: .65; }
+.snwhy { padding: 6px 10px; font-size: .9em; color: var(--vscode-editorWarning-foreground); border-bottom: 1px solid var(--line); }
+.sncode { margin: 0; padding: 10px 12px; overflow: auto; max-height: 320px; font-family: var(--vscode-editor-font-family); font-size: .92em; line-height: 1.5; tab-size: 2; }
 .zone .diagram { border: 0; background: transparent; padding: 6px 0 0; }
 .zone .composer { max-width: 72ch; }
 .navbar { display: flex; gap: 10px; align-items: center; justify-content: center; padding: 8px 16px; border-top: 1px solid var(--line); background: var(--vscode-editor-background); }
@@ -1076,7 +1152,9 @@ kbd { font-family: var(--mono); font-size: .9em; padding: 0 4px; border: 1px sol
 // String.raw so regexes and escapes below reach the webview as written.
 export const SCRIPT = String.raw`
 const root = document.getElementById('root');
-const show = (...kids) => root.replaceChildren(...kids.filter(k => k != null && k !== false));
+// Every walkthrough screen starts with the switcher between coee's pages.
+const navRow = () => el('div', { className: 'navrow' }, coeeNav(st.status === 'planning' || st.isPlan ? 'plan' : st.review ? 'changes' : 'walkthrough'));
+const show = (...kids) => root.replaceChildren(navRow(), ...kids.filter(k => k != null && k !== false));
 let st = null, draft = '', seenFocus = 0;
 const send = (type, extra) => vscode.postMessage({ type, ...extra });
 
@@ -1178,10 +1256,34 @@ function zone(s, k) {
     el('div', { className: 'zsub' }, 'lines ' + s.startLine + '–' + s.endLine + (kind ? ' · ' + kind : '')),
     el('div', { className: 'zprose' }, withTerms(md(s.text))),
     diagram(s),
+    snippets(s, k),
     thread(extras),
     st.busy && !extras.length ? thinking() : null,
     askOpen === k || extras.length ? composer('Ask about this step') : null,
     finish());
+}
+
+/** Code a plan proposes, with where it stands: Add (previewed first), Added, or Copy only when its place can't be found. */
+function snippets(s, k) {
+  if (!s.snippets || !s.snippets.length) return null;
+  const first = t => (t || '').split('\n').find(l => l.trim()) || '';
+  const how = x => x.mode === 'new' ? 'new file' : x.mode === 'replace' ? 'replaces ' : x.after ? 'goes after ' : 'at the top';
+  const anchor = x => x.mode === 'replace' ? first(x.find) : x.mode === 'insert' ? first(x.after) : '';
+  return el('div', { className: 'snips' }, ...s.snippets.map((x, n) => {
+    const pre = el('pre', { className: 'sncode' });
+    pre.innerHTML = x.code.split('\n').map(l => hl(l, x.lang || '')).join('\n');
+    const at = (st.snippets || {})[k + ':' + n] || { status: 'ready' };
+    const state = at.status === 'added' ? el('span', { className: 'snstate ok', title: 'This code is in the file' }, '✓ Added')
+      : at.status === 'error' ? el('span', { className: 'snstate bad', title: at.reason }, "Can't place") : null;
+    return el('div', { className: 'snip' + (at.status === 'added' ? ' done' : '') },
+      el('div', { className: 'snhead' }, el('span', { className: 'snfile' }, x.file),
+        el('span', { className: 'snmode' }, how(x), anchor(x) ? el('code', {}, anchor(x).trim().slice(0, 60)) : null),
+        el('span', { className: 'snacts' }, state,
+          el('button', { className: 'btn quiet', onclick: () => send('snippet', { i: k, n, act: 'copy' }) }, 'Copy'),
+          at.status === 'ready' ? el('button', { className: 'btn', title: 'Shows the file before and after first; Undo takes it back', onclick: () => send('snippet', { i: k, n, act: 'insert' }) }, 'Add…') : null)),
+      at.status === 'error' ? el('p', { className: 'snwhy' }, at.reason + ' Copy it and place it yourself.') : null,
+      pre);
+  }));
 }
 
 function tabbar(tabs) {
