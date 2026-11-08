@@ -264,72 +264,37 @@
       ],
       "coee.editor": [
         {
+          "command": "coee.architecture",
+          "group": "1_hub@1"
+        },
+        {
           "command": "coee.explain",
           "when": "editorHasSelection",
-          "group": "1_code@1"
+          "group": "2_code@1"
         },
         {
           "command": "coee.explainFile",
-          "group": "1_code@2"
+          "group": "2_code@2"
         },
         {
           "command": "coee.ask",
-          "group": "1_code@3"
-        },
-        {
-          "command": "coee.architecture",
-          "group": "2_project@1"
-        },
-        {
-          "command": "coee.tour",
-          "group": "2_project@2"
-        },
-        {
-          "command": "coee.plan",
-          "group": "2_project@3"
-        },
-        {
-          "command": "coee.security",
-          "group": "2_project@4"
-        },
-        {
-          "command": "coee.changes",
-          "group": "3_changes@1"
-        },
-        {
-          "command": "coee.recent",
-          "group": "4_more@1"
+          "group": "2_code@3"
         }
       ],
       "coee.explorer": [
         {
-          "command": "coee.explainFile",
-          "when": "!explorerResourceIsFolder",
-          "group": "1_explain@1"
+          "command": "coee.architecture",
+          "group": "1_hub@1"
         },
         {
           "command": "coee.explainResource",
           "when": "explorerResourceIsFolder",
-          "group": "1_explain@1"
+          "group": "2_code@1"
         },
         {
-          "command": "coee.architecture",
-          "when": "explorerResourceIsFolder",
-          "group": "1_explain@2"
-        },
-        {
-          "command": "coee.plan",
-          "when": "explorerResourceIsFolder",
-          "group": "2_project@1"
-        },
-        {
-          "command": "coee.security",
-          "group": "2_project@2"
-        },
-        {
-          "command": "coee.changes",
-          "when": "explorerResourceIsFolder",
-          "group": "3_changes@1"
+          "command": "coee.explainFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "2_code@1"
         }
       ],
       "scm/title": [

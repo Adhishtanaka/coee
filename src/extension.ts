@@ -103,7 +103,7 @@ export function activate(context: vscode.ExtensionContext) {
 				await walkthrough.review(dir, 'commit');
 			} catch (err) { walkthrough.fail(err); }
 		}),
-		vscode.commands.registerCommand('coee.architecture', safe(async (arg?: unknown, focus?: unknown) => architecture.open(await dirOf(arg), false, typeof focus === 'string' ? focus : undefined))),
+		vscode.commands.registerCommand('coee.architecture', safe(async (arg?: unknown, focus?: unknown) => architecture.open(await dirOf(arg) ?? (arg instanceof vscode.Uri ? vscode.workspace.getWorkspaceFolder(arg)?.uri : undefined), false, typeof focus === 'string' ? focus : undefined))),
 		// The page switcher on every coee page.
 		vscode.commands.registerCommand('coee.go', safe(async (to?: unknown, root?: unknown) => {
 			const r = root instanceof vscode.Uri ? root : undefined;

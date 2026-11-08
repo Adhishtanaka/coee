@@ -24,12 +24,14 @@ Findings are grouped by OWASP Top 10 category, with a short explanation of each.
 ## Getting started
 
 1. Make sure a chat model is available in VS Code, for example GitHub Copilot.
-2. Open a file and click **Explain** above a function, or right-click and choose **coee**.
+2. Right-click your project folder and choose **coee → Architecture overview**. Everything else starts from there: walkthroughs, Changes, the security scan and planning.
+3. In code, click **Explain** above a function for a step-by-step walkthrough.
 
 | Where | What you can do |
 |---|---|
-| Editor, right-click → **coee** | Explain lines or a file, ask a question, plan a change, open the architecture overview, scan for security gaps, open Changes |
-| Explorer, right-click → **coee** | Explain a file or folder, plan a change, open the architecture overview, scan a file or folder for security gaps |
+| Editor, right-click → **coee** | Open the architecture overview, explain lines or the file, ask a question |
+| Explorer, right-click → **coee** | Open the architecture overview, explain a file or folder |
+| Any coee page | Switch between Architecture, Changes, Security, Plan and Walkthrough |
 | Source Control title bar | Open Changes, explain a commit |
 | Source Control Graph, right-click a commit | Explain a commit |
 
