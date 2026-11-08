@@ -170,24 +170,14 @@ export class WalkthroughController implements vscode.Disposable {
 
 	/** Open the tab beside the code, or bring it forward. */
 	/**
-	 * The Walkthrough page from the switcher: the walkthrough that's open, if there is one; otherwise (nothing yet, or the
-	 * page is showing a plan or a review) a choice of what to walk through: the codebase, the file in the editor, or a recent one.
+	 * The Walkthrough tab, without questions: the walkthrough that's open; else the last one (reopened from the cache,
+	 * so it's instant); else a tour of the project.
 	 */
 	async openWalkthrough(root?: vscode.Uri) {
 		const walking = this.panel && this.state.w && !this.session?.plan && !this.session?.review && this.state.status !== 'planning';
 		if (walking) return this.panel!.reveal(this.panel!.viewColumn, false);
-		const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.scheme === 'file');
-		const recent = this.store.get<Recent[]>(RECENT_KEY, []).filter(r => r.kind !== 'plan' && r.kind !== 'review').slice(0, 8);
-		const items: Array<vscode.QuickPickItem & { id: string }> = [
-			{ label: '$(map) Tour this codebase', description: 'every part, one after another', id: 'tour' },
-			...editor ? [{ label: `$(file-code) Walk through ${path.basename(editor.document.uri.path)}`, description: 'the file in the editor', id: 'file' }] : [],
-			...recent.length ? [{ label: 'Recent', kind: vscode.QuickPickItemKind.Separator, id: '' }, ...recent.map(r => ({ label: `$(history) ${r.label}`, description: r.sub, id: r.id }))] : [],
-		];
-		const pick = await vscode.window.showQuickPick(items, { placeHolder: 'What should coee walk you through?' });
-		if (!pick) return;
-		if (pick.id === 'tour') return this.tour(root);
-		if (pick.id === 'file' && editor) return this.explainResource(editor.document.uri);
-		return this.reopen(pick.id);
+		const last = this.store.get<Recent[]>(RECENT_KEY, []).find(r => r.kind !== 'plan' && r.kind !== 'review');
+		return last ? this.reopen(last.id) : this.tour(root);
 	}
 
 	private openPanel() {
