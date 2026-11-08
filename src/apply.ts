@@ -80,8 +80,17 @@ export async function addCode(root: vscode.Uri, sn: Snippet, label = "the sugges
 	const edit = new vscode.WorkspaceEdit();
 	let doc: vscode.TextDocument;
 	if (now === undefined) {
-		edit.createFile(uri, { contents: new TextEncoder().encode(q.text) });
-		if (!await vscode.workspace.applyEdit(edit)) { vscode.window.showErrorMessage(`coee: couldn't create ${sn.file}.`); return false; }
+		if (uri.scheme === 'file') {
+			// Created exclusively ("wx" = O_CREAT|O_EXCL): it fails if anything, a symlink included, appeared at that
+			// path since the check, so the write can never follow a link planted in between.
+			try {
+				await fs.mkdir(path.dirname(uri.fsPath), { recursive: true });
+				await fs.writeFile(uri.fsPath, q.text, { flag: 'wx' });
+			} catch (err) { vscode.window.showErrorMessage(`coee: couldn't create ${sn.file} (${(err as NodeJS.ErrnoException).code ?? err}).`); return false; }
+		} else {
+			edit.createFile(uri, { contents: new TextEncoder().encode(q.text), overwrite: false, ignoreIfExists: false });
+			if (!await vscode.workspace.applyEdit(edit)) { vscode.window.showErrorMessage(`coee: couldn't create ${sn.file}.`); return false; }
+		}
 		doc = await vscode.workspace.openTextDocument(uri);
 	} else {
 		doc = await vscode.workspace.openTextDocument(uri);

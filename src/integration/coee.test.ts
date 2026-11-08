@@ -133,6 +133,12 @@ suite('coee in VS Code', () => {
 			const ok = await answering('showInformationMessage', () => 'Add', () => addCode(root(), { file: 'linked/x.js', mode: 'new', code: 'x()' }));
 			assert.equal(ok, false);
 			assert.ok(!nodefs.existsSync(path.join(outside, 'x.js')));
+			// A new file is created inside the project, exactly once.
+			const sn = { file: 'tests/new.test.js', mode: 'new' as const, code: "test('x', () => {});" };
+			assert.equal(await answering('showInformationMessage', () => 'Add', () => addCode(root(), sn)), true);
+			assert.equal(nodefs.readFileSync(path.join(root().fsPath, 'tests/new.test.js'), 'utf8'), "test('x', () => {});\n");
+			assert.equal(await answering('showInformationMessage', () => 'Add', () => addCode(root(), sn)), false, 'already added');
+			nodefs.rmSync(path.join(root().fsPath, 'tests'), { recursive: true });
 		} finally {
 			nodefs.unlinkSync(path.join(root().fsPath, 'linked'));
 		}
