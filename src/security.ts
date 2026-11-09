@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { createHash } from 'crypto';
-import { Finding, HitRef, SecurityReport, batchFiles, buildSecurityPrompt, depFinding, mergeReports, repairSecurity, ruleFinding, toSarif } from './prompt';
+import { Finding, HitRef, Scene, SecurityReport, Snippet, Walkthrough, batchFiles, buildSecurityPrompt, depFinding, mergeReports, repairSecurity, ruleFinding, toSarif } from './prompt';
 import { OWASP, scanText } from './rules';
 import { auditDependencies } from './deps';
 import { diagramSvg } from './layout';
@@ -10,6 +10,8 @@ import { pickProject, sourceFiles } from './map';
 import { digest, readFiles } from './walkthrough';
 import { createPanel, page, showLines } from './ui';
 import { addCode, fileText, fixSnippet } from './apply';
+import { indexProject } from './codeindex';
+import { TraceStep, proofCommand, proofPath, traceAttack } from './proof';
 
 const CACHE_KEY = 'coee.security';
 const DISMISS_KEY = 'coee.security.dismissed';
@@ -34,6 +36,10 @@ interface PageState {
 	/** Why the model's part is missing, when it is. */
 	note?: string;
 	focus?: string;
+	/** Per finding: the attack's path through the code, source first, with the best place for the fix. */
+	traces?: Record<string, TraceStep[]>;
+	/** Per finding: what running its proof test showed. */
+	proofs?: Record<string, { status: 'running' | 'vulnerable' | 'safe' | 'error'; note?: string; file?: string }>;
 }
 
 /** Same finding across scans: the rule (or title) and the text of its first line, not its line number. */
@@ -60,11 +66,12 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 	private readonly disposables: vscode.Disposable[] = [this.diagnostics];
 	private ids = new Map<string, string>(); // finding id → fingerprint
 
-	constructor(private readonly ext: vscode.ExtensionContext) {
+	constructor(private readonly ext: vscode.ExtensionContext, private readonly showSteps: (root: vscode.Uri, w: Walkthrough, heading: string) => Promise<void>) {
 		this.disposables.push(
 			vscode.languages.registerCodeActionsProvider({ scheme: 'file' }, this, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }),
 			vscode.commands.registerCommand('coee.securityFix', (id: string) => this.applyFix(id)),
 			vscode.commands.registerCommand('coee.securityShow', (id: string) => this.reveal(id)),
+			vscode.commands.registerCommand('coee.securityProve', (id: string) => this.prove(id)),
 			vscode.window.onDidChangeActiveColorTheme(() => { if (this.state.report) { this.state.svgs = this.svgs(this.state.report); this.post(); } }),
 		);
 	}
@@ -126,6 +133,8 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 				await vscode.env.clipboard.writeText(m.text);
 				return void vscode.window.showInformationMessage('coee: copied.');
 			case 'fix': return m.id && this.applyFix(m.id);
+			case 'walkAttack': return m.id && this.walkAttack(m.id);
+			case 'prove': return m.id && this.prove(m.id);
 			case 'plan': return vscode.commands.executeCommand('coee.plan', this.root, m.text);
 			case 'sarif': return this.exportSarif();
 			case 'dismiss': case 'restore': {
@@ -220,7 +229,9 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 			if (gen !== this.gen) return;
 			for (const f of report.findings) this.ids.set(f.id, await fingerprint(root, f));
 			const gone = new Set(this.ext.workspaceState.get<string[]>(DISMISS_KEY, []));
-			this.show({ report, svgs: this.svgs(report), dismissed: report.findings.filter(f => gone.has(this.ids.get(f.id)!)).map(f => f.id), scanned: files.length, left: all.length - files.length, reading: undefined });
+			const idx = indexProject(files), texts = new Map(files.map(f => [f.path, f.text]));
+			const traces = Object.fromEntries(report.findings.filter(f => f.source !== 'dependency' && idx.files.has(f.file)).map(f => [f.id, traceAttack(idx, f.file, f.startLine, texts)]));
+			this.show({ traces, proofs: {}, report, svgs: this.svgs(report), dismissed: report.findings.filter(f => gone.has(this.ids.get(f.id)!)).map(f => f.id), scanned: files.length, left: all.length - files.length, reading: undefined });
 			this.publish();
 		} catch (err) {
 			if (gen !== this.gen || isCancel(err) || (err instanceof Error && err.message === 'cancelled')) return;
@@ -258,6 +269,11 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 				fix.isPreferred = true;
 				out.push(fix);
 			}
+			if (f.testCode) {
+				const prove = new vscode.CodeAction('coee: prove it…', vscode.CodeActionKind.QuickFix);
+				prove.command = { command: 'coee.securityProve', title: 'Prove it', arguments: [f.id] };
+				out.push(prove);
+			}
 			const explain = new vscode.CodeAction('coee: explain this finding', vscode.CodeActionKind.QuickFix);
 			explain.command = { command: 'coee.securityShow', title: 'Explain', arguments: [f.id] };
 			out.push(explain);
@@ -277,6 +293,69 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 		if (!this.panel) return;
 		this.panel.reveal(this.panel.viewColumn, false);
 		this.show({ focus: id });
+	}
+
+	/**
+	 * The attack, step by step in the editor, like a walkthrough: where the input enters, each function it passes
+	 * through, the dangerous line, and the step where the fix belongs (with the fix code to add there).
+	 */
+	private async walkAttack(id: string) {
+		const f = this.state.report?.findings.find(x => x.id === id), trace = this.state.traces?.[id];
+		if (!f || !trace || !this.root) return;
+		const fix = await fixSnippet(this.root, f);
+		const scenes: Scene[] = trace.map((t, k) => {
+			const text = t.role === 'source' ? `This is where the attacker's input comes in. ${f.exploit || ''}`
+				: t.role === 'sink' ? `${f.why}${fix ? '' : `\n\n${f.fix}`}`
+				: `The input reaches \`${t.label.replace(/\(\).*/, '')}()\` unchanged: nothing here checks or cleans it.`;
+			const scene: Scene = { title: t.label, label: `Step ${k + 1} of ${trace.length}${t.fixHere ? ' · validate the input here' : ''}`, file: t.file, startLine: t.line, endLine: t.endLine,
+				text: t.fixHere && t.role !== 'sink' ? `${text}\n\nThis is the best place to check the input: as early as it reaches your code, before it travels further. ${f.fix}` : text };
+			// The fix itself goes where the finding is (the dangerous lines).
+			if (t.role === 'sink' && fix) { scene.snippets = [fix]; scene.title = `${t.label}: fix it here`; }
+			return scene;
+		});
+		await this.showSteps(this.root, { title: `Attack: ${f.title}`, summary: f.why, scenes }, `Attack · ${f.title}`);
+	}
+
+	/**
+	 * Prove it: save the finding's proof test beside the code (previewed, like any change), then run it with the project's
+	 * own test runner in a VS Code task, after the user agrees. The test asserts the code is safe: failing means the
+	 * attack works. Local only, in a trusted workspace.
+	 */
+	private async prove(id: string): Promise<'vulnerable' | 'safe' | 'error' | undefined> {
+		const f = this.state.report?.findings.find(x => x.id === id), root = this.root;
+		if (!f?.testCode || !root) return;
+		if (!vscode.workspace.isTrusted) { vscode.window.showWarningMessage('coee runs proof tests only in a trusted workspace.'); return; }
+		const file = proofPath(f.file, f.id);
+		const sn: Snippet = { file, mode: 'new', code: f.testCode };
+		const existing = await fileText(vscode.Uri.joinPath(root, file));
+		if (existing === undefined && !await addCode(root, sn, 'the proof test')) return;
+		const manifest = await fileText(vscode.Uri.joinPath(root, 'package.json'));
+		const run = proofCommand(file, manifest, p => !!vscode.workspace.textDocuments.find(d => d.uri.path.endsWith('/' + p)));
+		if (!run) { vscode.window.showWarningMessage(`coee doesn't know how to run ${file}. Run it with your test runner.`); return; }
+		const shown = [run.command, ...run.args].join(' ');
+		const ok = await vscode.window.showWarningMessage(`Run the proof test for "${f.title}"?`, { modal: true, detail: `coee will run this in a terminal, in ${path.basename(root.path)}:\n\n${shown}\n\nThe test attacks your code locally, in-process. It doesn't contact any server.` }, 'Run');
+		if (ok !== 'Run') return;
+		this.setProof(id, { status: 'running', file });
+		const task = new vscode.Task({ type: 'coee-proof', id }, vscode.TaskScope.Workspace, `proof ${f.id}`, 'coee', new vscode.ProcessExecution(run.command, run.args, { cwd: root.fsPath }));
+		task.presentationOptions = { reveal: vscode.TaskRevealKind.Silent, panel: vscode.TaskPanelKind.Dedicated, clear: true };
+		const done = new Promise<number | undefined>(resolve => {
+			const sub = vscode.tasks.onDidEndTaskProcess(e => { if (e.execution.task === task || e.execution.task.name === task.name) { sub.dispose(); resolve(e.exitCode); } });
+		});
+		try {
+			await vscode.tasks.executeTask(task);
+			const code = await done;
+			this.setProof(id, code === 0 ? { status: 'safe', file, note: `the proof test passes (${run.framework}), so this attack no longer works.` }
+				: { status: 'vulnerable', file, note: `The proof test fails (${run.framework}). Apply the fix, then run it again.` });
+			return code === 0 ? 'safe' : 'vulnerable';
+		} catch (err) {
+			this.setProof(id, { status: 'error', file, note: err instanceof Error ? err.message : String(err) });
+			return 'error';
+		}
+	}
+
+	private setProof(id: string, p: NonNullable<PageState['proofs']>[string]) {
+		this.state.proofs = { ...this.state.proofs, [id]: p };
+		this.post();
 	}
 
 	/** Saved per code version (a hash of the files); `coee.cache` turns it off. */
@@ -344,6 +423,13 @@ details.learn summary { cursor: pointer; color: var(--link); }
 .reading { display: flex; gap: 12px; align-items: center; color: var(--muted); }
 .reading .sweep { flex: 0 0 80px; }
 .rejected li { margin: 4px 0; }
+.trace { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.trace li.sink > span:first-child { color: var(--c); font-weight: 600; }
+.fixbadge { margin-left: 8px; font-size: .75em; padding: 0 6px; border-radius: 3px; border: 1px solid var(--vscode-testing-iconPassed, #3fb950); color: var(--vscode-testing-iconPassed, #3fb950); }
+.proof { padding: 8px 12px; border-radius: 6px; font-weight: 600; }
+.proof.vulnerable { background: color-mix(in srgb, var(--vscode-errorForeground) 15%, transparent); color: var(--vscode-errorForeground); }
+.proof.safe { background: color-mix(in srgb, var(--vscode-testing-iconPassed, #3fb950) 15%, transparent); color: var(--vscode-testing-iconPassed, #3fb950); }
+.proof.running, .proof.error { border: 1px solid var(--line); color: var(--muted); font-weight: 400; }
 `;
 
 export const SCRIPT = String.raw`
@@ -362,24 +448,39 @@ const source = f => f.source === 'dependency' ? el('span', { className: 'src' },
     : el('span', { className: 'src', title: 'A pattern matched; the model did not check it' }, 'Pattern · unchecked'))
   : el('span', { className: 'src', title: 'Found by reading the code with the model' }, 'Model');
 
+/** The attack's path, source first, with where the fix belongs. */
+function trace(f) {
+  const t = st.traces && st.traces[f.id];
+  if (!t || t.length < 2) return null;
+  return sec('The path through your code', el('ol', { className: 'trace' }, ...t.map(x => el('li', { className: x.role + (x.fixHere ? ' fixhere' : '') },
+    el('span', {}, x.label), ' ',
+    el('button', { className: 'link mono', onclick: () => send('open', { path: x.file, startLine: x.line, endLine: x.endLine }) }, x.file + ':' + x.line),
+    x.fixHere ? el('span', { className: 'fixbadge' }, 'validate here') : null))));
+}
+
 function finding(f, dismissed) {
+  const proof = st.proofs && st.proofs[f.id];
   const where = f.file + ':' + f.startLine + (f.endLine !== f.startLine ? '–' + f.endLine : '');
   const pic = st.svgs && st.svgs[f.id] ? (() => { const d = el('div', { className: 'pic' }); d.innerHTML = st.svgs[f.id]; return d; })() : null;
   return el('section', { className: 'finding ' + f.severity + (focused === f.id ? ' focus' : ''), id: 'f-' + f.id },
     el('div', { className: 'meta' }, el('span', { className: 'sev' }, f.severity), el('span', {}, f.category + (f.cwe ? ' · ' + f.cwe : '')), source(f)),
     el('h3', {}, f.title),
+    proof ? el('div', { className: 'proof ' + proof.status }, proof.status === 'running' ? 'Running the proof test…' : proof.status === 'vulnerable' ? '⚠ Proven: the attack works. ' + (proof.note || '') : proof.status === 'safe' ? '✓ Fixed: ' + (proof.note || '') : 'The proof test couldn\'t run: ' + (proof.note || '')) : null,
     el('div', { className: 'where' }, el('button', { className: 'link', title: 'Show these lines in the editor', onclick: () => send('open', { path: f.file, startLine: f.startLine, endLine: f.endLine }) }, where)),
     sec("What's wrong", f.why),
     sec('Why ' + f.severity, f.severityWhy),
     sec('How it could be abused', f.exploit),
-    pic ? sec('The attack, step by step', pic) : null,
+    trace(f),
+    pic ? sec('The attack, as a sequence', pic) : null,
     sec('Check it yourself', f.verify),
     sec('How to fix it', f.fix),
     f.fixCode ? code(f.fixCode) : null,
     f.testCode ? sec('A test that catches it', code(f.testCode)) : null,
     f.url ? el('p', { className: 'note' }, el('button', { className: 'link', onclick: () => send('copy', { text: f.url }) }, 'Copy the advisory link')) : null,
     el('div', { className: 'actions' },
-      f.fixCode && !dismissed ? el('button', { className: 'btn', title: 'Shows the change first; Undo takes it back', onclick: () => send('fix', { id: f.id }) }, 'Apply fix…') : null,
+      st.traces && st.traces[f.id] && !dismissed ? el('button', { className: 'btn', title: 'Follow the input through the code, step by step, in the editor', onclick: () => send('walkAttack', { id: f.id }) }, 'Step through the attack') : null,
+      f.testCode && !dismissed ? el('button', { className: 'btn quiet', title: 'Save the proof test beside the code and run it with your test runner (asks first)', onclick: () => send('prove', { id: f.id }) }, proof && proof.status !== 'running' ? 'Run the proof again' : 'Prove it') : null,
+      f.fixCode && !dismissed ? el('button', { className: 'btn quiet', title: 'Shows the change first; Undo takes it back', onclick: () => send('fix', { id: f.id }) }, 'Apply fix…') : null,
       !dismissed ? el('button', { className: 'btn quiet', title: 'Plan this fix, with the code and tests', onclick: () => send('plan', { text: 'Fix: ' + f.title + ' (' + f.file + ', lines ' + f.startLine + '–' + f.endLine + ')' }) }, 'Plan this fix') : null,
       el('button', { className: 'btn quiet', title: dismissed ? 'Show it again' : 'Not a problem here; coee will remember', onclick: () => send(dismissed ? 'restore' : 'dismiss', { id: f.id }) }, dismissed ? 'Restore' : 'Not a problem')));
 }

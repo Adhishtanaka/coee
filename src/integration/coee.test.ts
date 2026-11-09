@@ -11,8 +11,8 @@ import { showLines } from '../ui';
 const root = () => vscode.workspace.workspaceFolders![0].uri;
 const file = (p: string) => vscode.Uri.joinPath(root(), p);
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-async function until<T>(what: string, get: () => T | undefined | false, ms = 20_000): Promise<T> {
-	for (const end = Date.now() + ms; Date.now() < end; await sleep(200)) { const v = get(); if (v) return v; }
+async function until<T>(what: string, get: () => T | undefined | false | Promise<T | undefined | false>, ms = 20_000): Promise<T> {
+	for (const end = Date.now() + ms; Date.now() < end; await sleep(200)) { const v = await get(); if (v) return v; }
 	throw new Error(`timed out waiting for ${what}`);
 }
 /** Code actions at a range. VS Code cancels the query if the editor changes meanwhile (a page opening, diagnostics
@@ -30,7 +30,7 @@ const text = async (p: string) => (await vscode.workspace.openTextDocument(file(
 const coeeGroups = () => vscode.window.tabGroups.all.filter(g => g.tabs.some(t => t.input instanceof vscode.TabInputWebview));
 
 /** Answer a VS Code prompt the way a user would, for the length of `fn`. */
-async function answering<T>(api: 'showInformationMessage' | 'showSaveDialog', answer: unknown, fn: () => Promise<T>): Promise<T> {
+async function answering<T>(api: 'showInformationMessage' | 'showSaveDialog' | 'showWarningMessage', answer: unknown, fn: () => Promise<T>): Promise<T> {
 	const win = vscode.window as unknown as Record<string, unknown>, original = win[api];
 	win[api] = async (...args: unknown[]) => typeof answer === 'function' ? answer(...args) : answer;
 	try { return await fn(); } finally { win[api] = original; }
@@ -52,7 +52,13 @@ const model = new FakeModel()
 		states: [{ name: 'Request', what: 'From received to answered.', diagram: { nodes: [{ id: 'r', label: 'received', detail: 'open' }, { id: 'a', label: 'answered', detail: 'sent' }], edges: [{ from: 'r', to: 'a', label: 'send' }] } }] })
 	.on(/data model/, { what: 'An array of todos.', entities: [{ id: 't', name: 'Todo', kind: 'type', fields: [{ name: 'title', type: 'string' }] }], relations: [] })
 	.on(/business rules and guards of a codebase/, p => ({ rules: [...p.matchAll(/^\[([^\]]+)\]/gm)].map(m => ({ id: m[1], plain: 'A rule, in plain words.' })) }))
-	.on(/application security reviewer/, { summary: 'Pattern hits only.', findings: [], rejected: [] })
+	.on(/application security reviewer/, p => {
+		// Confirm the path traversal hit, with a proof test and a fix; leave the other hits unchecked.
+		const id = /\[(path-traversal:files\.js:\d+)\]/.exec(p)?.[1];
+		return { summary: 'One proven path traversal.', rejected: [], findings: id ? [{ hit: id, severity: 'high', title: 'File name can climb out of uploads', why: 'A name with ../ reads any file.', exploit: 'read("../package.json")', owasp: 'A01',
+			fixCode: "exports.read = name => { if (name.includes('..')) throw new Error('bad name'); return fs.readFileSync('./uploads/' + name); };",
+			testCode: "const test = require('node:test');\nconst assert = require('node:assert');\nconst { read } = require('./files');\ntest('read refuses names that leave uploads', () => {\n  assert.throws(() => read('../package.json'));\n});" }] : [] };
+	})
 	.on(/reviewing a colleague's change/, p => {
 		const line = Number(/(\d+) \+ .*cache/.exec(p)?.[1] ?? 1);
 		return { summary: 'Adds a cache.', risk: 'medium', findings: [{ severity: 'medium', kind: 'bug', title: 'Cache never expires', why: 'Entries stay forever, so memory grows with every request.', startLine: line, endLine: line,
@@ -103,6 +109,28 @@ suite('coee in VS Code', () => {
 		for (const cwe of ['CWE-22', 'CWE-78', 'CWE-95', 'CWE-79']) assert.ok(cwes.has(cwe), `missing ${cwe}: ${[...cwes]}`);
 		const actions = await codeActions(file('files.js'), diags[0].range);
 		assert.ok(actions.some(a => a.title === 'coee: explain this finding'));
+	});
+
+	test('security: prove it runs the proof test, which fails while vulnerable and passes once fixed', async () => {
+		await vscode.window.showTextDocument(file('files.js'), { viewColumn: vscode.ViewColumn.One });
+		await vscode.commands.executeCommand('coee.security', file('files.js'));
+		const d = await until('the confirmed finding', () => vscode.languages.getDiagnostics(file('files.js')).find(x => x.source === 'coee security' && /climb out of uploads/.test(x.message)));
+		const prove = await until('a prove-it action', async () => (await codeActions(file('files.js'), d.range)).find(a => a.title === 'coee: prove it…'));
+		const yes = (_msg: string, ...items: unknown[]) => items.includes('Add') ? 'Add' : undefined; // the user accepts the new proof file
+		const run = () => answering('showInformationMessage', yes, () => answering('showWarningMessage', (_m: string, ..._i: unknown[]) => 'Run', async () =>
+			vscode.commands.executeCommand<string>(prove.command!.command, ...prove.command!.arguments!)));
+		assert.equal(await run(), 'vulnerable', 'the attack works on the planted code');
+		assert.ok(nodefs.existsSync(path.join(root().fsPath, 'files.coee-proof-' + prove.command!.arguments![0] + '.test.js')), 'the proof test sits beside the code');
+		// Fix it the way the finding says, then prove again.
+		const src = path.join(root().fsPath, 'files.js');
+		const before = nodefs.readFileSync(src, 'utf8');
+		nodefs.writeFileSync(src, before.replace("exports.read = name => fs.readFileSync('./uploads/' + name);", "exports.read = name => { if (name.includes('..')) throw new Error('bad name'); return fs.readFileSync('./uploads/' + name); };"));
+		try {
+			assert.equal(await run(), 'safe', 'the proof passes once fixed');
+		} finally {
+			nodefs.writeFileSync(src, before);
+			nodefs.rmSync(path.join(root().fsPath, 'files.coee-proof-' + prove.command!.arguments![0] + '.test.js'), { force: true });
+		}
 	});
 
 	test('security: SARIF export writes what the scan found', async () => {

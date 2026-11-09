@@ -91,6 +91,8 @@ interface Job {
 }
 
 interface Session {
+	/** Built by coee (an attack trace): shown, but not kept in Recent, since it can't be rebuilt from a file. */
+	prebuilt?: boolean;
 	uri: vscode.Uri;
 	range: vscode.Range;
 	jobs: Job[];
@@ -181,6 +183,16 @@ export class WalkthroughController implements vscode.Disposable {
 		if (walking) return this.panel!.reveal(this.panel!.viewColumn, false);
 		const last = this.store.get<Recent[]>(RECENT_KEY, []).find(r => r.kind !== 'plan' && r.kind !== 'review');
 		return last ? this.reopen(last.id) : this.tour(root);
+	}
+
+	/** A walkthrough coee built itself (an attack trace, say): shown like any other, beside the code. */
+	async showPrebuilt(root: vscode.Uri, w: Walkthrough, heading: string) {
+		const gen = this.restart();
+		this.session = { prebuilt: true, uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, [...new Set(w.scenes.map(s => s.file).filter((f): f is string => !!f))]),
+			jobs: [{ where: { file: w.scenes[0]?.file, startLine: 1, endLine: 1, what: heading }, run: async () => w }] };
+		this.state = fresh({ status: 'loading', heading, source: heading, busy: true });
+		this.openPanel();
+		await this.runJobs(gen, heading, heading);
 	}
 
 	private openPanel() {
@@ -675,7 +687,7 @@ export class WalkthroughController implements vscode.Disposable {
 	/** Note a finished walkthrough in Recent, so it can be reopened (from the cache, instantly). */
 	private async remember(label: string, sub: string) {
 		const s = this.session;
-		if (!s) return;
+		if (!s || s.prebuilt) return;
 		const kind: Recent['kind'] = s.review ? 'review' : s.plan ? 'plan' : s.files ? (s.jobs.length > 1 || s.switchable ? 'tour' : 'folder') : 'range';
 		const r: Recent = { id: '', label, sub, kind, uri: s.uri.toString(), question: s.plan ?? s.review?.target.header, target: s.review?.target, t: Date.now() };
 		if (kind === 'range') { r.start = s.range.start.line; r.end = s.range.end.line; }

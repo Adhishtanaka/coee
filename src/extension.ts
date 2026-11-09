@@ -41,7 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const map = new MapController(context);
 	const walkthrough = new WalkthroughController(context.extensionUri, map, context.workspaceState);
 	const architecture = new ArchitectureController(context, map);
-	const security = new SecurityController(context);
+	const security = new SecurityController(context, (root, w, heading) => walkthrough.showPrebuilt(root, w, heading));
 	context.subscriptions.push(security);
 	walkthrough.onStep = (file, line) => architecture.follow(file, line);
 	const changes = new ChangesController(context, t => walkthrough.review(undefined, undefined, t).catch(err => walkthrough.fail(err)));

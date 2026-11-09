@@ -10,6 +10,7 @@ import { packContext } from '../context';
 import { scanText } from '../rules';
 import { planSteps } from '../steps';
 import { projectFacts } from '../facts';
+import { traceAttack } from '../proof';
 
 const ROOT = path.join(__dirname, '../../test/fixtures');
 interface Expected {
@@ -82,6 +83,13 @@ for (const name of fs.readdirSync(ROOT).filter(d => fs.existsSync(path.join(ROOT
 		for (const [file, rules] of Object.entries(x.flaws)) {
 			const got = new Set(scanText(file, files.find(f => f.path === file)!.text).map(h => h.rule));
 			for (const r of rules) assert.ok(got.has(r), `${file}: ${r} (got ${[...got].join(', ')})`);
+			// Each flaw has a path from where input enters to the dangerous line, with one place to validate.
+			for (const h of scanText(file, files.find(f => f.path === file)!.text).filter(h => rules.includes(h.rule))) {
+				const t = traceAttack(idx, file, h.line, new Map(files.map(f => [f.path, f.text])));
+				assert.equal(t[0].role, 'source', `${file}:${h.line} starts where input enters`);
+				assert.deepEqual([t[t.length - 1].role, t[t.length - 1].line], ['sink', h.line], `${file}:${h.line} ends at the flaw`);
+				assert.equal(t.filter(x => x.fixHere).length, 1);
+			}
 		}
 	});
 
