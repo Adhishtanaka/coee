@@ -2,6 +2,7 @@
 // Every build*Prompt takes `budget`, the characters it may use; lm.ts shrinks it until the prompt fits the model.
 
 import { packContext } from './context';
+import type { Step } from './steps';
 
 // ---------------------------------------------------------------------------
 // Walkthroughs
@@ -25,6 +26,12 @@ export interface Scene {
 	part?: number;
 	/** Plans: code to add for this scene, which the reader can copy or insert. */
 	snippets?: Snippet[];
+	/** Steps planned by coee (steps.ts): the symbols this step is about, what it takes and gives, its rules and links. */
+	names?: string[];
+	io?: { inputs?: string; output?: string; effects?: string };
+	rules?: string[];
+	calls?: string[];
+	calledBy?: string[];
 }
 
 /**
@@ -206,6 +213,75 @@ function fileTask(ctx: CodeContext): string {
 	return `Explain the ${ctx.lang} file ${ctx.file}.\n${FILE_EXPLAINING}${which}`;
 }
 
+/**
+ * A walkthrough whose steps coee has already chosen (steps.ts): every function, class and method, in call order, with
+ * exact lines. The model writes each step; it doesn't choose or move them.
+ */
+export function buildStepsPrompt(ctx: CodeContext, steps: readonly Step[], budget = 1e9): string {
+	const list = steps.map(st => `${st.id} · ${st.label} · lines ${st.startLine}-${st.endLine}${st.signature ? ` · \`${st.signature.slice(0, 120)}\`` : ''}`
+		+ `${st.calls.length ? ` · calls ${st.calls.join(', ')}` : ''}${st.calledBy.length ? ` · called by ${st.calledBy.join(', ')}` : ''}${st.rules.length ? ` · has ${st.rules.length} rule${st.rules.length === 1 ? '' : 's'}` : ''}`).join('\n');
+	const head = `${ROLE}
+${GUIDE}
+
+Explain this ${ctx.lang} code from ${ctx.file} as a step-by-step walkthrough. The steps are already chosen: one per function, class or method, in the order the code runs. Write EVERY step below, in this order, using its id. Don't add, merge, skip or move steps.
+${list}
+
+For each step:
+- "title": the takeaway, one short sentence (not just the name).
+- "text": 60-140 words. What it's for and why it exists, then how it does it, naming the real variables and calls. Explain the non-obvious parts: an edge case, a trick, a gotcha, why it's written this way. For "Start here": what this file is for, what it imports and keeps, and where execution enters. For "How it fits together": how the steps work together, as one story from where it starts to what it produces. For "Small helpers": one sentence per helper.
+- "inputs": what it takes (parameters, and what each means), "output": what it returns or produces, "effects": state it changes, I/O, network, files, or other calls with consequences. Plain words, one line each; omit when there's nothing.
+- "rules": the business rules and guards inside it in plain words, one per item ("a title is required", "only the owner can cancel"); omit when there are none.
+- "diagram": only when a picture helps (a branchy flow, calls back and forth, a lifecycle).
+${surroundings(ctx, 1500)}
+${DIAGRAM_RULES}
+
+Reply with ONLY JSON, no prose:
+{"title": string, "summary": string (one or two sentences: what this code is for), ${LEARNING_SCHEMA}, "steps": [{"id": string, "title": string, "text": string, "inputs"?: string, "output"?: string, "effects"?: string, "rules"?: [string], ${DIAGRAM_SCHEMA}}]}
+
+\`\`\``;
+	return `${head}
+${numberedFit(ctx, budget - head.length - 200)}
+\`\`\``;
+}
+
+/**
+ * The model's words on coee's steps: lines, labels and links come from the step, never from the model.
+ * A step the model skipped is an error the first time (it's asked again), and after that gets a plain step from the
+ * index, so a walkthrough never silently leaves a function out.
+ */
+export function repairSteps(draft: any, steps: readonly Step[]): { value?: Walkthrough; errors: string[] } {
+	if (!draft || typeof draft !== 'object') return { errors: ['Reply is not a JSON object'] };
+	const raw: any[] = Array.isArray(draft.steps) ? draft.steps : Array.isArray(draft.scenes) ? draft.scenes : [];
+	const byId = new Map(raw.map(x => [str(x?.id, 10), x]));
+	const missing: string[] = [];
+	const scenes: Scene[] = steps.map((st, k) => {
+		const x = byId.get(st.id) ?? (raw.length === steps.length ? raw[k] : undefined); // ids dropped but order kept: still usable
+		const text = str(x?.text ?? x?.explanation, 3000);
+		if (!text) missing.push(st.id);
+		const scene: Scene = {
+			title: str(x?.title, 200) || st.label, label: st.label, startLine: st.startLine, endLine: st.endLine,
+			text: text || [st.signature ? `\`${st.signature}\`` : '', st.calls.length ? `Calls ${st.calls.map(c => `\`${c}\``).join(', ')}.` : '', st.calledBy.length ? `Called by ${st.calledBy.map(c => `\`${c}\``).join(', ')}.` : ''].filter(Boolean).join(' ') || 'See the highlighted lines.',
+		};
+		if (st.names.length) scene.names = st.names;
+		const io = { inputs: str(x?.inputs, 300), output: str(x?.output, 300), effects: str(x?.effects, 300) };
+		if (io.inputs || io.output || io.effects) scene.io = Object.fromEntries(Object.entries(io).filter(([, v]) => v));
+		const rules = (Array.isArray(x?.rules) ? x.rules : []).map((r: unknown) => str(r, 200)).filter(Boolean).slice(0, 8);
+		if (rules.length) scene.rules = rules; else if (st.rules.length) scene.rules = st.rules.slice(0, 8);
+		if (st.calls.length) scene.calls = st.calls;
+		if (st.calledBy.length) scene.calledBy = st.calledBy;
+		const diagram = repairDiagram(x?.diagram ?? x?.mermaid);
+		if (diagram) scene.diagram = diagram;
+		return scene;
+	});
+	const errors = missing.length ? [`These steps are missing their "text": ${missing.join(', ')}. Write every step, by id.`] : [];
+	const w: Walkthrough = { title: str(draft.title, 200) || scenes[0].title, summary: str(draft.summary, 500), scenes };
+	const learn = (Array.isArray(draft.learn) ? draft.learn : []).map((x: unknown) => str(x, 160)).filter(Boolean).slice(0, 4);
+	if (learn.length) w.learn = learn;
+	const terms = repairTerms(draft.terms);
+	if (terms.length) w.terms = terms;
+	return { value: w, errors };
+}
+
 export function buildExplainPrompt(ctx: CodeContext, budget = 1e9): string {
 	const room = budget - FIXED;
 	const around = surroundings(ctx, room * 0.15);
@@ -338,7 +414,7 @@ export function buildTourOverviewPrompt(map: SystemMap, files: FolderFile[], bud
 	return filesWalkthrough(`${mapContext(map)}
 
 This is the first part of a guided tour of the whole codebase; later parts take each component in turn. Give the overview a newcomer needs before reading any code. For this overview, use these scenes in this order instead of the generic order below (skip one only if it truly doesn't apply):
-1. label "Big picture": what this project does and for whom, concretely (what a user does with it, what comes out), pointing at the entry point (where execution starts).
+1. label "Big picture": what this project does and for whom, concretely (what a user does with it, what comes out), pointing at the entry point (where execution starts: the first file shown, marked "entry point" in its outline).
 2. label "Architecture": how the parts above fit together, with a "flow" diagram whose nodes are those parts (use their names) and whose edges say what passes between them.
 3. label "State": the central lifecycle or status the system manages, with a "state" diagram, only if there is one.
 4. label "Where to start": which files to read first and the conventions that hold across the code.

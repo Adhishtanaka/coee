@@ -2,7 +2,7 @@
 // method in the order the code runs (call order), then "How it fits together". Each step has its exact lines, what it
 // calls, what calls it, and the rules (guards, validation) inside it. The model only writes the words.
 // Pure, so the harness checks that every function gets a step and every range is exact.
-import { indexFile } from './codeindex';
+import { indexProject } from './codeindex';
 
 export interface Step {
 	id: string;
@@ -27,7 +27,7 @@ const MAX_STEPS = 12;
  * there is one) win over the index's own; `firstPart`/`lastPart` say whether this range starts or ends the walkthrough.
  */
 export function planSteps(file: string, text: string, first: number, last: number, opts: { firstPart?: boolean; lastPart?: boolean; symbols?: SymbolSpan[] } = {}): Step[] {
-	const fi = indexFile(file, text);
+	const fi = indexProject([{ path: file, text }]).files.get(file)!; // the project index also works out who calls whom
 	const all = (opts.symbols?.length ? opts.symbols : fi.symbols).filter(s => s.line >= first && s.line <= last);
 	// Functions nested inside other functions belong to their parent's step; methods stay (they're the class's parts).
 	const syms = all.filter(s => !all.some(o => o !== s && o.kind !== 'class' && s.kind !== 'method' && o.line < s.line && s.end <= o.end))
@@ -43,7 +43,7 @@ export function planSteps(file: string, text: string, first: number, last: numbe
 		if (s.kind === 'class') {
 			const firstMethod = syms.find(m => m.kind === 'method' && m.line > s.line && m.end <= s.end);
 			const end = firstMethod ? Math.max(s.line, firstMethod.line - 1) : s.end;
-			return [{ names: [s.name], startLine: s.line, endLine: end, label: `class ${s.name}`, signature: s.signature, kind: 'symbol' }];
+			return [{ names: [s.name], startLine: s.line, endLine: Math.min(end, last), label: `class ${s.name}`, signature: s.signature, kind: 'symbol' }];
 		}
 		return [{ names: [s.name], startLine: s.line, endLine: Math.min(s.end, last), label: `${s.kind} ${s.name}`, signature: s.signature, kind: 'symbol' }];
 	});

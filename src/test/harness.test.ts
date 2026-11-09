@@ -8,6 +8,7 @@ import * as path from 'path';
 import { indexProject, outline } from '../codeindex';
 import { packContext } from '../context';
 import { scanText } from '../rules';
+import { planSteps } from '../steps';
 
 const ROOT = path.join(__dirname, '../../test/fixtures');
 interface Expected {
@@ -47,6 +48,21 @@ for (const name of fs.readdirSync(ROOT).filter(d => fs.existsSync(path.join(ROOT
 
 	test(`harness ${name}: the index finds every expected fact`, () => {
 		assert.deepEqual(facts.filter(f => !f.found).map(f => f.what), []);
+	});
+
+	test(`harness ${name}: a file walkthrough has a step for every function, with its exact lines`, () => {
+		for (const [file, fns] of Object.entries(x.functions)) {
+			const text = files.find(f => f.path === file)!.text;
+			const steps = planSteps(file, text, 1, text.split('\n').length, { firstPart: true, lastPart: true });
+			const fi = idx.files.get(file)!;
+			for (const fn of fns) {
+				const step = steps.find(st => st.names.includes(fn));
+				assert.ok(step, `${file}: no step for ${fn}`);
+				const sym = fi.symbols.find(sy => sy.name === fn)!;
+				if (step!.kind === 'symbol') assert.deepEqual([step!.startLine, step!.endLine], [sym.line, sym.end], `${file}: ${fn} lines`);
+			}
+			assert.ok(steps.length <= 12, `${file}: ${steps.length} steps`);
+		}
 	});
 
 	test(`harness ${name}: the planted flaws are caught by the rules`, () => {

@@ -107,7 +107,7 @@ function dtoFields(lines: string[], from: number, to: number, lang: Lang, kind: 
 /** Everything the index knows about one file. */
 export function indexFile(path: string, text: string): FileIndex {
 	const lang = langOf(path), lines = text.split('\n');
-	const f: FileIndex = { path, lang, lines: lines.length, imports: [], symbols: [], routes: [], dtos: [], rules: [], calls: {} };
+	const f: FileIndex = { path, lang, lines: lines.length, imports: [], symbols: [], routes: [], dtos: [], rules: [], calls: Object.create(null) as Record<string, string[]> }; // no prototype: a method named "constructor" or "toString" must not find Object's own
 	const classes: Array<{ name: string; end: number }> = [];
 	const test = TEST_FILE.test(path);
 	let urlPath = '';

@@ -3,12 +3,14 @@ import * as path from 'path';
 import { createHash } from 'crypto';
 import {
 	CodeContext, Diagram, FolderFile, HelpMode, Scene, SystemMap, Turn, Walkthrough, buildAskPrompt, buildExplainPrompt, buildMorePrompt, buildTourOverviewPrompt,
-	buildPlanPickPrompt, buildPlanPrompt, buildReviewPrompt, buildTourPartPrompt, buildTourUseCasesPrompt, withMapDiagram, endLine, packChapters, repair, repairPick, repairPlan, placeSnippet, isTestFile,
+	buildPlanPickPrompt, buildPlanPrompt, buildReviewPrompt, buildTourPartPrompt, buildTourUseCasesPrompt, withMapDiagram, endLine, packChapters, repair, repairPick, repairPlan, placeSnippet, isTestFile, buildStepsPrompt, repairSteps,
 } from './prompt';
 import { Lm, Prompt, isCancel, log } from './lm';
 import { diagramSvg } from './layout';
 import { MANIFEST, MapController, pickProject, read, sourceFiles } from './map';
 import { sampleTree } from './subsystems';
+import { SymbolSpan, planSteps } from './steps';
+import { indexFile, indexProject } from './codeindex';
 import { codeColumn, createPanel, page } from './ui';
 import { addCode, fileText } from './apply';
 import { Review, ReviewFile, ReviewTarget, collect, openDiff, pickReview, repoRoot, useCommitMessage } from './git';
@@ -307,13 +309,27 @@ export class WalkthroughController implements vscode.Disposable {
 		// The outline gives a slice its surroundings, and gives a whole file the list of its classes, functions and globals.
 		const outline = outlineOf(doc, symbols);
 		const parts = spans.map((p, k) => ({ ...contextFor(doc, p.start, p.end, outline, n > 1 ? { index: k, count: n, earlier: [] } : undefined), wholeFile: wholeFile || undefined, testFile: testFile || undefined }));
-		const jobs: Job[] = parts.map(base => ({
-			where: { startLine: base.startLine, endLine: endLine(base), what: `lines ${base.startLine}–${endLine(base)}` },
-			run: earlier => this.cached({ explain: base, earlier }, () => {
-				const ctx: CodeContext = base.part ? { ...base, part: { ...base.part, earlier } } : base;
-				return this.reader.json<Walkthrough>(b => buildExplainPrompt(ctx, b), d => repair(d, ctx.startLine, endLine(ctx)));
-			}),
-		}));
+		// Every function, class and method gets its own step, in call order, with its exact lines (steps.ts). The editor's
+		// symbols are added to the index's own (the index also sees handlers like `const server = createServer(...)`).
+		const kindOf = (k: vscode.SymbolKind): SymbolSpan['kind'] | undefined => k === vscode.SymbolKind.Function ? 'function'
+			: k === vscode.SymbolKind.Method || k === vscode.SymbolKind.Constructor ? 'method'
+			: [vscode.SymbolKind.Class, vscode.SymbolKind.Interface, vscode.SymbolKind.Struct, vscode.SymbolKind.Enum].includes(k) ? 'class' : undefined;
+		const fileText = doc.getText(), rel = vscode.workspace.asRelativePath(doc.uri);
+		const fromEditor = flat.flatMap(x => { const kind = kindOf(x.kind); return kind ? [{ name: x.name, kind, line: x.range.start.line + 1, end: x.range.end.line + 1 }] : []; });
+		const fromIndex = indexFile(rel, fileText).symbols;
+		const symbolsAll: SymbolSpan[] = [...fromIndex, ...fromEditor.filter(e => !fromIndex.some(i => i.line === e.line))];
+		const jobs: Job[] = parts.map((base, k) => {
+			const steps = testFile ? [] : planSteps(rel, fileText, base.startLine, endLine(base), { firstPart: k === 0, lastPart: k === n - 1, symbols: symbolsAll });
+			return {
+				where: { startLine: base.startLine, endLine: endLine(base), what: `lines ${base.startLine}–${endLine(base)}` },
+				run: earlier => this.cached({ explain: base, earlier, v: steps.length ? 'steps1' : undefined, steps }, () => {
+					const ctx: CodeContext = base.part ? { ...base, part: { ...base.part, earlier } } : base;
+					// No functions in these lines (a config, a script body): the model picks the scenes as before.
+					if (!steps.length) return this.reader.json<Walkthrough>(b => buildExplainPrompt(ctx, b), d => repair(d, ctx.startLine, endLine(ctx)));
+					return this.reader.json<Walkthrough>(b => buildStepsPrompt(ctx, steps, b), d => repairSteps(d, steps));
+				}),
+			};
+		});
 		this.session = { uri: doc.uri, range, jobs, parts, summaries: [] };
 		const name = path.basename(doc.fileName);
 		await this.runJobs(gen, `Reading ${name}`, `${name}:${first + 1}–${last + 1}`, n > 1 ? spans.map((p, k) => `Part ${k + 1} · lines ${p.start + 1}–${p.end + 1}`) : undefined, n > 1);
@@ -441,6 +457,10 @@ export class WalkthroughController implements vscode.Disposable {
 		// The whole project is read (each part's own files first); the packer shows the rest as outlines.
 		const { files, lines } = await readFiles(root, [...new Set([...wanted, ...all])], TOUR_CHARS);
 		if (gen !== this.gen) return;
+		// The tour starts where the program does: entry points found by the index lead the overview.
+		const entries = [...indexProject(files).files.values()].filter(f => f.entry).map(f => f.path);
+		overviewPaths.unshift(...entries.filter(p => !overviewPaths.includes(p)));
+		overviewPaths.sort((a, b) => Number(entries.includes(b)) - Number(entries.includes(a)));
 		const byPath = new Map(files.map(f => [f.path, f]));
 		const pick = (paths: string[]) => paths.map(p => byPath.get(p)).filter((f): f is FolderFile => !!f);
 		const first = (paths: string[]) => ({ file: paths[0], startLine: 1, endLine: 1 });
@@ -1084,6 +1104,15 @@ body.vscode-light .tk { color: #0b5cad; } body.vscode-light .ts { color: #1a7f37
 .ztitle { font-size: 1.45em; font-weight: 500; line-height: 1.3; }
 .zsub { font-size: .76em; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: -6px; }
 .zprose .md { font-size: 1.1em; line-height: 1.7; max-width: 72ch; }
+.facts { display: grid; gap: 6px; max-width: 80ch; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--vscode-editorWidget-background); }
+.fact { display: grid; grid-template-columns: 7.5em minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.fk { font-size: .78em; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.fact .md p { margin: 0; }
+.rules { margin: 0; padding-left: 18px; }
+.lchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lchip { font-family: var(--mono); font-size: .88em; border: 1px solid var(--line); border-radius: 999px; padding: 0 9px; background: none; color: var(--link); }
+.lchip:hover { background: var(--vscode-list-hoverBackground); }
+.lchip.off { color: var(--muted); }
 .snips { display: grid; gap: 12px; max-width: 80ch; }
 .snip { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .snhead { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px 10px; background: var(--vscode-editorWidget-background); border-bottom: 1px solid var(--line); font-size: .88em; }
@@ -1263,12 +1292,27 @@ function zone(s, k) {
     el('h2', { className: 'ztitle' }, s.title),
     el('div', { className: 'zsub' }, 'lines ' + s.startLine + '–' + s.endLine + (kind ? ' · ' + kind : '')),
     el('div', { className: 'zprose' }, withTerms(md(s.text))),
+    facts(s),
     diagram(s),
     snippets(s, k),
     thread(extras),
     st.busy && !extras.length ? thinking() : null,
     askOpen === k || extras.length ? composer('Ask about this step') : null,
     finish());
+}
+
+/** What a step takes and gives, the rules inside it, and links to the steps it calls and is called by. */
+function facts(s) {
+  const io = s.io || {};
+  const row = (label, text) => text ? el('div', { className: 'fact' }, el('span', { className: 'fk' }, label), el('span', {}, withTerms(md(text)))) : null;
+  const stepOf = name => st.w.scenes.findIndex(x => (x.names || []).includes(name));
+  const chips = (label, names) => names && names.length ? el('div', { className: 'fact' }, el('span', { className: 'fk' }, label),
+    el('span', { className: 'lchips' }, ...names.map(n => { const k = stepOf(n); return k >= 0
+      ? el('button', { className: 'lchip', title: 'Go to the step for ' + n, onclick: () => send('go', { i: k }) }, n)
+      : el('span', { className: 'lchip off', title: 'Not in this walkthrough' }, n); }))) : null;
+  const rules = s.rules && s.rules.length ? el('div', { className: 'fact' }, el('span', { className: 'fk' }, 'Rules'), el('ul', { className: 'rules' }, ...s.rules.map(r => el('li', {}, withTerms(md(r)))))) : null;
+  const all = [row('Takes', io.inputs), row('Gives', io.output), row('Also', io.effects), rules, chips('Calls →', s.calls), chips('Called by ←', s.calledBy)].filter(Boolean);
+  return all.length ? el('div', { className: 'facts' }, ...all) : null;
 }
 
 /** Code a plan proposes, with where it stands: Add (previewed first), Added, or Copy only when its place can't be found. */
