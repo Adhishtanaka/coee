@@ -1,0 +1,9 @@
+{
+  "entries": ["main.c"],
+  "functions": { "main.c": ["greet", "read_age", "main"] },
+  "routes": [],
+  "dtos": [],
+  "rules": [],
+  "calls": [["main", "greet"], ["main", "read_age"]],
+  "flaws": { "main.c": ["c-strcpy"] }
+}

@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
 const workspace = mkdtempSync(join(tmpdir(), 'coee-it-'));
-cpSync('fixtures/app', workspace, { recursive: true });
+cpSync('test/fixtures/app', workspace, { recursive: true });
 const git = (...a) => execFileSync('git', a, { cwd: workspace });
 git('init', '-q');
 git('-c', 'user.name=test', '-c', 'user.email=test@example.com', 'add', '.');

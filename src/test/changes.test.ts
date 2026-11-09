@@ -58,3 +58,26 @@ test('prompts: the review shows the diff and the whole file; the commit prompt s
 	assert.match(p, /--- cart\.js/);
 	assert.ok(buildCommitMessagePrompt([file], 2000).length <= 2000);
 });
+
+test('compressDiff: pr-agent style; main language first, deletions named, nothing silently dropped', async () => {
+	const { compressDiff } = await import('../prompt');
+	const hunk = (lines: Array<['+' | '-' | ' ', string]>) => ({ oldStart: 1, newStart: 1, newLines: lines.length, lines: lines.map(([t, text]) => ({ t, text })) });
+	const files = [
+		{ path: 'README.md', status: 'modified' as const, hunks: [hunk([['+', 'docs']])] },
+		{ path: 'src/a.ts', status: 'modified' as const, hunks: [hunk([['+', 'x'.repeat(50)], ['-', 'old']]), hunk([['-', 'only removed']])] },
+		{ path: 'src/b.ts', status: 'modified' as const, hunks: [hunk([['+', 'y']])] },
+		{ path: 'src/gone.ts', status: 'deleted' as const, hunks: [hunk([['-', 'bye']])] },
+		{ path: 'src/trim.ts', status: 'modified' as const, hunks: [hunk([['-', 'cut']])] },
+		{ path: 'logo.png', status: 'modified' as const, hunks: [], binary: true },
+	];
+	const all = compressDiff(files, 1e9);
+	assert.deepEqual(all.shown, ['src/a.ts', 'src/b.ts', 'README.md']); // .ts is the main language; bigger change first
+	assert.ok(!all.text.includes('only removed'), 'hunks that only delete are left out');
+	assert.match(all.text, /Deleted files:\n- src\/gone\.ts/);
+	assert.match(all.text, /- src\/trim\.ts \(only removals\)/);
+	assert.match(all.text, /- logo\.png \(binary\)/);
+	const tight = compressDiff(files, 500);
+	assert.deepEqual(tight.shown, ['src/a.ts']);
+	assert.ok(tight.minimized.includes('src/b.ts') && tight.minimized.includes('README.md'));
+	assert.ok(tight.text.length <= 500);
+});

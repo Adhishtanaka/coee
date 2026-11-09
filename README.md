@@ -58,6 +58,7 @@ coee changes your files only when you click **Add** or **Apply** and confirm. In
 
 ```sh
 npm install && npm test   # build and run the unit tests
-npm run test:integration  # run the extension in a real VS Code (downloads VS Code once)
+npm run test:integration  # run the extension in a real VS Code (uses your installed VS Code)
+npm run harness           # what coee finds in the sample projects in test/fixtures, and what reaches the model
 npm run package           # create coee-x.y.z.vsix
 ```

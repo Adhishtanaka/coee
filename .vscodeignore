@@ -5,7 +5,7 @@ out/test/**
 tsconfig.json
 media/icon.svg
 node_modules/**
-fixtures/**
+test/**
 out/integration/**
 .vscode-test.mjs
 .vscode-test/**

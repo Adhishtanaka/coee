@@ -1,6 +1,8 @@
 // Pure prompt, repair and packing logic. No vscode import, so it's unit-testable.
 // Every build*Prompt takes `budget`, the characters it may use; lm.ts shrinks it until the prompt fits the model.
 
+import { packContext } from './context';
+
 // ---------------------------------------------------------------------------
 // Walkthroughs
 
@@ -225,19 +227,16 @@ ${numberedFit(ctx, room - around.length)}
 \`\`\``;
 }
 
-/** Files into `room` chars: whole files while they fit, then outlines, then just their paths. */
-export function packFiles(files: FolderFile[], room: number): string {
-	const shown: string[] = [], listed: string[] = [];
-	for (const f of files) {
-		const full = `--- ${f.path}\n${numberLines(f.text).join('\n')}`;
-		const outline = `--- ${f.path} (outline; line numbers are real)\n${excerpt(f.text)}`;
-		const pick = full.length <= room * 0.5 ? full : outline.length <= room ? outline : '';
-		if (pick) { shown.push(pick); room -= pick.length; } else listed.push(f.path);
-	}
-	return shown.join('\n\n') + (listed.length ? `\n\nOther files (not shown):\n${listed.join('\n')}` : '');
+/**
+ * Files into `room` chars, the way pr-agent packs a pull request: ranked (the `focus` files, entry points, core files
+ * first), every file's outline from the code index (functions, routes, data shapes, rules, real line numbers), and as
+ * many files whole as fit. See context.ts.
+ */
+export function packFiles(files: FolderFile[], room: number, focus: readonly string[] = []): string {
+	return packContext(files, Math.max(0, room), focus).text;
 }
 
-function filesWalkthrough(task: string, files: FolderFile[], budget: number, scenes: string, opts: { role?: string; snippets?: boolean } = {}): string {
+function filesWalkthrough(task: string, files: FolderFile[], budget: number, scenes: string, opts: { role?: string; snippets?: boolean; focus?: readonly string[] } = {}): string {
 	const scene = SCENE_SCHEMA(true).replace(/\}$/, opts.snippets ? `, "snippets"?: [{"file": string, "mode": "insert"|"replace"|"new", "after"?: string, "find"?: string, "lang"?: string, "code": string}]}` : '}');
 	return `${opts.role ?? ROLE}
 ${GUIDE}
@@ -252,7 +251,7 @@ ${DIAGRAM_RULES}
 Reply with ONLY JSON, no prose:
 {"title": string, "summary": string (one or two sentences), ${LEARNING_SCHEMA}, "scenes": [${scene}]}
 
-${packFiles(files, budget - FIXED - task.length - 1500)}`;
+${packFiles(files, budget - FIXED - task.length - 1500, opts.focus)}`;
 }
 
 function mapContext(map: SystemMap): string {
@@ -309,12 +308,12 @@ export function repairPick(draft: any, known: readonly string[]): { value?: { ap
 }
 
 /** Second call: the walkthrough of how the change would fit, from the picked files. */
-export function buildPlanPrompt(map: SystemMap, question: string, approach: string, files: FolderFile[], budget = 1e9): string {
+export function buildPlanPrompt(map: SystemMap, question: string, approach: string, files: FolderFile[], budget = 1e9, focus: readonly string[] = []): string {
 	return filesWalkthrough(`${mapContext(map)}
 
 The developer asks: "${question}"
 ${approach ? `A first read of the codebase suggests: ${approach}\n` : ''}
-${PLAN_RULES}`, files, budget, '5-10', { role: PLAN_ROLE, snippets: true });
+${PLAN_RULES}`, files, budget, '5-10', { role: PLAN_ROLE, snippets: true, focus });
 }
 
 /** A plan must carry its tests: a "Tests" scene whose snippets hold the test code. Without them the model is asked once more. */
@@ -335,7 +334,7 @@ export function repairPlan(draft: any, files: Record<string, number>, texts: rea
 }
 
 /** Codebase tour, part 1: the whole system, before any one component. */
-export function buildTourOverviewPrompt(map: SystemMap, files: FolderFile[], budget = 1e9): string {
+export function buildTourOverviewPrompt(map: SystemMap, files: FolderFile[], budget = 1e9, focus: readonly string[] = []): string {
 	return filesWalkthrough(`${mapContext(map)}
 
 This is the first part of a guided tour of the whole codebase; later parts take each component in turn. Give the overview a newcomer needs before reading any code. For this overview, use these scenes in this order instead of the generic order below (skip one only if it truly doesn't apply):
@@ -344,11 +343,11 @@ This is the first part of a guided tour of the whole codebase; later parts take 
 3. label "State": the central lifecycle or status the system manages, with a "state" diagram, only if there is one.
 4. label "Where to start": which files to read first and the conventions that hold across the code.
 Don't trace individual user actions here; the next part of the tour covers the use cases.
-The files shown are the README, manifests and entry points. Point scenes at source code (the entry point, the main loop or router, the key functions), not at the README or manifests, except at most one scene.`, files, budget, '3-4');
+The files shown are the README, manifests and entry points. Point scenes at source code (the entry point, the main loop or router, the key functions), not at the README or manifests, except at most one scene.`, files, budget, '3-4', { focus });
 }
 
 /** Codebase tour, part 2: what people do with the project, each traced through the code. */
-export function buildTourUseCasesPrompt(map: SystemMap, files: FolderFile[], budget = 1e9): string {
+export function buildTourUseCasesPrompt(map: SystemMap, files: FolderFile[], budget = 1e9, focus: readonly string[] = []): string {
 	return filesWalkthrough(`${mapContext(map)}
 
 This part of a guided tour of the codebase covers its use cases: the 2-4 main things someone does with this project (a command they run, a request they send, a screen they use, a job that runs), the ones a newcomer must understand to understand the codebase. For this part, use this structure instead of the generic order below.
@@ -356,7 +355,7 @@ For each use case, one scene (two if it has an important branch), labelled "Use 
 - First what the person does and what they get back, in one or two plain sentences.
 - Then how it flows through the code, in order: where it enters (point the scene at those lines), which parts it passes through (by their names above), where data is read or written, what comes back.
 - Add a "sequence" diagram of that flow through the parts (nodes are the parts or key functions, by their real names) when it crosses two or more parts; a "flow" diagram instead when the interesting part is a branch or decision. Skip the diagram if the flow stays inside one function.
-End with one scene labelled "How they fit" only if the use cases share an important path worth pointing out.`, files, budget, '3-6');
+End with one scene labelled "How they fit" only if the use cases share an important path worth pointing out.`, files, budget, '3-6', { focus });
 }
 
 /**
@@ -397,7 +396,7 @@ export function buildTourPartPrompt(map: SystemMap, c: MapComponent, files: Fold
 This part of a guided tour of the codebase covers the component "${c.name}": ${c.description || c.summary}
 It ${links.join('; ') || 'has no recorded connections'}.${cited.length ? `\nKey code: ${cited.join('; ')}` : ''}
 ${earlier.length ? `Earlier parts of the tour covered:\n${earlier.map(e => `- ${e}`).join('\n')}\nBuild on them; don't repeat them.\n` : ''}
-Explain how this component does its job: its responsibility and the main idea, the key code path, how it talks to the parts it connects to (a "sequence" diagram if calls go back and forth), any state it keeps (a "state" diagram if it has a lifecycle), and its edge cases.`, files, budget, '2-5');
+Explain how this component does its job: its responsibility and the main idea, the key code path, how it talks to the parts it connects to (a "sequence" diagram if calls go back and forth), any state it keeps (a "state" diagram if it has a lifecycle), and its edge cases.`, files, budget, '2-5', { focus: c.files.map(f => f.path) });
 }
 
 export function buildRepairPrompt(errors: string[]): string {
@@ -826,28 +825,8 @@ function refs(raw: unknown, known: readonly string[]): CodeRef[] {
 	return out;
 }
 
-/** Last line (0-based) of the block that starts at `start`: matching braces, else the indented body. Capped, so a miss stays small. */
-export function blockEnd(lines: readonly string[], start: number): number {
-	const cap = Math.min(lines.length - 1, start + 150);
-	let depth = 0, opened = false;
-	// A statement that ends on its own line (";") has no body of its own; brace-matching would run into the next block.
-	const braced = !/;\s*$/.test(lines[start]) && lines.slice(start, start + 3).some(l => l.includes('{'));
-	for (let i = start; braced && i <= cap; i++) {
-		for (const ch of lines[i].replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '')) {
-			if (ch === '{') { depth++; opened = true; } else if (ch === '}') depth--;
-		}
-		if (opened && depth <= 0) return i;
-	}
-	// No braces (Python, YAML, a one-liner): the block is what is indented deeper than its first line.
-	const indent = (l: string) => l.length - l.trimStart().length;
-	let end = start;
-	for (let i = start + 1; i <= cap; i++) {
-		if (!lines[i].trim()) continue;
-		if (indent(lines[i]) <= indent(lines[start])) break;
-		end = i;
-	}
-	return end;
-}
+export { blockEnd } from './blocks';
+import { blockEnd } from './blocks';
 
 /**
  * Make the model's line numbers match the file. A "symbol" (the text that starts the code) is looked up and wins over its numbers;
@@ -1004,21 +983,44 @@ export interface ReviewMeta {
 /** A walkthrough of a change, for a reviewer who is still learning: what it does, each logical change, what to check. */
 export function buildReviewPrompt(meta: ReviewMeta, files: FileDiff[], budget = 1e9): string {
 	const head = reviewInstructions(meta);
-	const room = budget - head.length - 300;
-	const shown: string[] = [], listed: string[] = [];
-	let left = room;
-	for (const f of files) {
-		const { plus, minus } = diffStats(f);
-		const head = `--- ${f.path}${f.oldPath ? ` (renamed from ${f.oldPath})` : ''} · ${f.status} · +${plus} −${minus}`;
-		if (f.binary || left < 400) { listed.push(`${f.path} (${f.status}${f.binary ? ', binary' : ''})`); continue; }
-		const body = renderHunks(f, Math.min(left - head.length, Math.max(1500, room / Math.min(files.length, 8))));
-		shown.push(`${head}\n${body}`);
-		left -= head.length + body.length + 2;
-	}
 	return `${head}
 
 Changed files:
-${shown.join('\n\n')}${listed.length ? `\n\nAlso changed (not shown):\n${listed.join('\n')}` : ''}`;
+${compressDiff(files, budget - head.length - 300).text}`;
+}
+
+/**
+ * A change in `room` chars, after pr-agent's compression: deleted files and hunks that only delete are named, not
+ * shown; files in the change's main language come first, biggest change first; files are added whole (all their
+ * hunks) while they fit, then the rest are listed by name. Nothing is dropped without saying so.
+ */
+export function compressDiff(files: readonly FileDiff[], room: number): { text: string; shown: string[]; minimized: string[]; deleted: string[] } {
+	const ext = (p: string) => p.split('.').pop()?.toLowerCase() ?? '';
+	const deleted = files.filter(f => f.status === 'deleted').map(f => f.path);
+	const live = files.filter(f => f.status !== 'deleted' && !f.binary)
+		.map(f => ({ ...f, stats: diffStats(f), hunks: f.hunks.filter(h => h.lines.some(l => l.t === '+')) })) // hunks that only delete say less than the files around them
+		.filter(f => f.hunks.length || f.status === 'renamed');
+	const langs = new Map<string, number>();
+	for (const f of live) langs.set(ext(f.path), (langs.get(ext(f.path)) ?? 0) + 1);
+	const size = (f: { stats: { plus: number; minus: number } }) => f.stats.plus + f.stats.minus;
+	live.sort((a, b) => (langs.get(ext(b.path))! - langs.get(ext(a.path))!) || size(b) - size(a));
+	const shown: string[] = [], minimized: string[] = [], parts: string[] = [];
+	// Every file's name is reserved first, so the list of what isn't shown always fits; a file shown whole gets its name back.
+	const nameCost = (p: string) => p.length + 20;
+	let left = room - 200 - deleted.reduce((n, p) => n + nameCost(p), 0) - files.reduce((n, f) => n + nameCost(f.path), 0);
+	for (const f of live) {
+		const { plus, minus } = f.stats; // the whole file's change, though only hunks that add are shown
+		const head = `--- ${f.path}${f.oldPath ? ` (renamed from ${f.oldPath})` : ''} · ${f.status} · +${plus} −${minus}`;
+		const body = renderHunks(f, 1e9);
+		if (head.length + body.length + 2 <= left + nameCost(f.path)) { parts.push(`${head}\n${body}`); shown.push(f.path); left -= head.length + body.length + 2 - nameCost(f.path); }
+		else minimized.push(f.path);
+	}
+	minimized.push(...files.filter(f => f.binary).map(f => `${f.path} (binary)`));
+	const onlyDeletions = files.filter(f => f.status !== 'deleted' && !f.binary && !f.hunks.some(h => h.lines.some(l => l.t === '+'))).map(f => `${f.path} (only removals)`);
+	minimized.push(...onlyDeletions);
+	if (minimized.length) parts.push(`Other modified files (not shown):\n${minimized.map(p => `- ${p}`).join('\n')}`);
+	if (deleted.length) parts.push(`Deleted files:\n${deleted.map(p => `- ${p}`).join('\n')}`);
+	return { text: parts.join('\n\n'), shown, minimized, deleted };
 }
 
 function reviewInstructions(meta: ReviewMeta): string {
@@ -1438,13 +1440,5 @@ export function relocate(f: { startLine: number; endLine: number; anchor: string
 /** A commit message for the whole change, from its diff. */
 export function buildCommitMessagePrompt(files: FileDiff[], budget = 1e9): string {
 	const head = `Write a git commit message for this change: a subject line under 72 characters in the imperative mood ("Add", "Fix"), a blank line, then 1-3 short lines on what changed and why. Plain text only, no markdown, no quotes around it.\n\n`;
-	let room = budget - head.length - 200;
-	const parts: string[] = [];
-	for (const f of files) {
-		const d = `--- ${f.path} (${f.status})\n${renderHunks(f, Math.max(0, Math.min(room, 6000)))}`;
-		if (d.length > room) break;
-		parts.push(d);
-		room -= d.length;
-	}
-	return head + parts.join('\n\n');
+	return head + compressDiff(files, budget - head.length - 200).text;
 }

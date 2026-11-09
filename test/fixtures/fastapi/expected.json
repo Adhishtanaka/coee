@@ -1,0 +1,9 @@
+{
+  "entries": ["app/main.py"],
+  "functions": { "app/main.py": ["list_notes", "create_note", "export"] },
+  "routes": [["GET", "app/main.py"], ["POST", "app/main.py"]],
+  "dtos": [["app/models.py", "Note", ["id", "title", "body"]], ["app/models.py", "NoteIn", ["title", "body"]]],
+  "rules": [["app/main.py", "too many notes"], ["app/models.py", "max_length"]],
+  "calls": [],
+  "flaws": { "app/main.py": ["py-shell"] }
+}

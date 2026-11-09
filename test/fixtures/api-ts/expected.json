@@ -1,0 +1,10 @@
+{
+  "entries": ["src/index.ts"],
+  "functions": { "src/services/orders.ts": ["priceOf", "createOrder", "cancelOrder"], "src/middleware/auth.ts": ["requireUser"] },
+  "routes": [["POST", "src/routes/orders.ts"], ["DELETE", "src/routes/orders.ts"]],
+  "dtos": [["src/types.ts", "Order", ["id", "ownerId", "items", "total", "status"]], ["src/types.ts", "OrderItem", ["sku", "quantity", "price"]], ["src/types.ts", "CreateOrderBody", ["items", "note"]]],
+  "rules": [["src/middleware/auth.ts", "login required"], ["src/services/orders.ts", "not your order"], ["src/services/orders.ts", "paid order cannot be cancelled"], ["src/services/orders.ts", "over the limit"], ["src/routes/orders.ts", "400"]],
+  "calls": [],
+  "core": "src/types.ts",
+  "flaws": {}
+}

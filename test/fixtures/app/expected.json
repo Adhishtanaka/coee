@@ -1,0 +1,9 @@
+{
+  "entries": ["server.js"],
+  "functions": { "server.js": ["send", "server"], "store.js": ["list", "add"], "files.js": ["read", "thumbnail", "calc", "page"] },
+  "routes": [["GET", "server.js"]],
+  "dtos": [],
+  "rules": [["server.js", "Method not allowed"]],
+  "calls": [["server", "send"]],
+  "flaws": { "files.js": ["path-traversal", "js-exec", "js-eval", "xss-html-concat"] }
+}

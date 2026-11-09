@@ -186,7 +186,8 @@ export class ArchitectureController implements vscode.Disposable {
 			this.state.map = map;
 			this.show({ archSvg: this.archSvg(map), reading: 'how it works' });
 			const { wanted } = projectFiles(all, map.components);
-			const { files } = await readFiles(root, wanted, TOUR_CHARS);
+			// The whole project (the parts' own files first): the packer shows what fits whole and outlines the rest.
+			const { files } = await readFiles(root, [...new Set([...wanted, ...all])], TOUR_CHARS);
 			this.files = files;
 			this.state.coverage = { read: files.length, total: all.length };
 			const known = files.map(f => f.path);
@@ -377,7 +378,9 @@ function render() {
     el('section', { id: 'arch' }, el('h2', {}, 'Architecture'),
       el('p', { className: 'muted' }, subs ? 'The packages this repository is made of, and which use which.' : 'Every part of the project and what passes between them.'),
       figure(st.archSvg, 'How the parts of ' + map.title + ' connect'),
-      st.coverage ? el('p', { className: 'note' }, 'Read ' + st.coverage.read + ' of ' + st.coverage.total + ' files' + (subs ? ' (manifests and READMEs). Open a package for its components, use cases and data.' : st.coverage.read < st.coverage.total ? ', the ones each part names first.' : '.')) : null),
+      st.coverage ? el('p', { className: 'note' }, subs ? 'Read the manifests and READMEs of ' + st.coverage.total + ' files. Open a package for its components, use cases and data.'
+        : 'Read ' + (st.coverage.read === st.coverage.total ? 'all ' : st.coverage.read + ' of ') + st.coverage.total + ' files: whole where they fit, the rest as outlines (every function, route, data shape and rule, with its lines).'
+          + (st.coverage.read < st.coverage.total ? ' The rest were over the reading limit.' : '')) : null),
     subs ? el('section', { id: 'packages' }, el('h2', {}, 'Packages'),
       el('div', { className: 'cards' }, ...subs.map(p => el('div', { className: 'card', id: 'c-' + p.path }, el('h3', {}, p.name),
         el('p', { className: 'muted mono' }, p.path + ' · ' + p.files + ' source files'),

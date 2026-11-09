@@ -169,7 +169,7 @@ test('tour prompts carry the map, the component and its code, within budget', as
 	assert.match(part, /component "Rate limiter": Per-IP fixed window/);
 	assert.match(part, /used by Task API \(throttles requests\)/);
 	assert.match(part, /Earlier parts of the tour covered/);
-	assert.match(part, /outline; line numbers are real/);
+	assert.match(part, /--- server\/rateLimit\.js \(outline: what it declares[\s\S]*function f0\(\)[\s\S]*more declarations/);
 	assert.match(buildTourOverviewPrompt(map, files, 20000), /"Architecture"[\s\S]*"flow" diagram/);
 	const { buildTourUseCasesPrompt } = await import('../prompt');
 	const uc = buildTourUseCasesPrompt(map, files, 20000);
@@ -179,10 +179,11 @@ test('tour prompts carry the map, the component and its code, within budget', as
 	assert.match(uc, /Skip the diagram if the flow stays inside one function/);
 });
 
-test('packFiles shows small files whole and lists what does not fit', () => {
-	const out = packFiles([{ path: 'a.js', text: 'x' }, { path: 'b.js', text: 'y'.repeat(5000) }], 1000);
+test('packFiles shows what fits whole and outlines the rest', () => {
+	const out = packFiles([{ path: 'a.js', text: 'x' }, { path: 'b.js', text: 'function big() {\n' + '  y();\n'.repeat(2000) + '}' }], 1000);
 	assert.match(out, /--- a\.js\n {3}1 \| x/);
-	assert.match(out, /Other files \(not shown\):\nb\.js|b\.js \(outline/);
+	assert.match(out, /--- b\.js \(outline[^\n]*\n[\s\S]*function big\(\)  \(lines 1-2002\)/);
+	assert.ok(out.length <= 1000);
 });
 
 test('outermost keeps separate codebases and drops projects nested in them', () => {

@@ -8,6 +8,7 @@ import {
 import { Lm, Prompt, isCancel, log } from './lm';
 import { diagramSvg } from './layout';
 import { MANIFEST, MapController, pickProject, read, sourceFiles } from './map';
+import { sampleTree } from './subsystems';
 import { codeColumn, createPanel, page } from './ui';
 import { addCode, fileText } from './apply';
 import { Review, ReviewFile, ReviewTarget, collect, openDiff, pickReview, repoRoot, useCommitMessage } from './git';
@@ -437,7 +438,8 @@ export class WalkthroughController implements vscode.Disposable {
 		if (only && !one) throw new Error('That part is no longer in the project map. Regenerate the architecture page.');
 		if (one && !one.files.length) throw new Error(`${one.name} has no files to walk through.`);
 		const { overviewPaths, wanted } = projectFiles(all, components);
-		const { files, lines } = await readFiles(root, wanted, TOUR_CHARS);
+		// The whole project is read (each part's own files first); the packer shows the rest as outlines.
+		const { files, lines } = await readFiles(root, [...new Set([...wanted, ...all])], TOUR_CHARS);
 		if (gen !== this.gen) return;
 		const byPath = new Map(files.map(f => [f.path, f]));
 		const pick = (paths: string[]) => paths.map(p => byPath.get(p)).filter((f): f is FolderFile => !!f);
@@ -445,15 +447,15 @@ export class WalkthroughController implements vscode.Disposable {
 		const jobs: Job[] = [
 			...(one ? [] : [
 			{ where: { ...first(overviewPaths), what: 'the overview' }, run: async () => withMapDiagram(await this.cached({ tour: root!.toString(), map, overview: true, code: digest(pick(overviewPaths)) }, () =>
-				this.reader.json<Walkthrough>(b => buildTourOverviewPrompt(map, pick(overviewPaths), b), d => repair(d, 1, 1, lines))), map) },
+				this.reader.json<Walkthrough>(b => buildTourOverviewPrompt(map, files, b, overviewPaths), d => repair(d, 1, 1, lines))), map) },
 			// Use cases see the entry points first, then each part's own files; the budget decides how much fits.
 			{ where: { ...first(overviewPaths), what: 'the use cases' }, run: (earlier: string[]) => this.cached({ tour: root!.toString(), map, useCases: true, earlier, code: digest(pick(wanted)) }, () =>
-				this.reader.json<Walkthrough>(b => buildTourUseCasesPrompt(map, pick(wanted), b), d => repair(d, 1, 1, lines))) },
+				this.reader.json<Walkthrough>(b => buildTourUseCasesPrompt(map, files, b, overviewPaths), d => repair(d, 1, 1, lines))) },
 			]),
 			...components.map(c => ({
 				where: { ...first(c.files.map(f => f.path)), what: c.name },
 				run: (earlier: string[]) => this.cached({ tour: root!.toString(), map, c: c.id, earlier, code: digest(pick(c.files.map(f => f.path))) }, () =>
-					this.reader.json<Walkthrough>(b => buildTourPartPrompt(map, c, pick(c.files.map(f => f.path)), earlier, b), d => repair(d, 1, 1, lines))),
+					this.reader.json<Walkthrough>(b => buildTourPartPrompt(map, c, files, earlier, b), d => repair(d, 1, 1, lines))),
 			})),
 		];
 		this.session = { uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, wanted), jobs, switchable: true };
@@ -544,12 +546,13 @@ export class WalkthroughController implements vscode.Disposable {
 		this.state = fresh({ status: 'loading', heading: question, source: `${name}/`, busy: true, reading: 'the project\'s parts' });
 		this.flush();
 		this.openPanel();
-		let map: SystemMap, picked: { approach: string; files: string[] };
+		let map: SystemMap, picked: { approach: string; files: string[] }, all: string[] = [];
 		try {
 			map = await this.maps.mapFor(root);
 			if (gen !== this.gen) return;
 			this.set({ reading: 'which files the change touches' });
-			const tree = (await sourceFiles(root)).slice(0, 800);
+			all = await sourceFiles(root);
+			const tree = sampleTree(all, 800);
 			try {
 				picked = await this.reader.json(b => buildPlanPickPrompt(map, tree, question, b), d => repairPick(d, tree));
 			} catch (err) {
@@ -563,12 +566,13 @@ export class WalkthroughController implements vscode.Disposable {
 			throw err;
 		}
 		if (gen !== this.gen) return;
-		const { files, lines } = await readFiles(root, picked.files, TOUR_CHARS);
+		// The picked files are the focus; the rest of the project comes along as outlines, so the plan sees what it touches.
+		const { files, lines } = await readFiles(root, [...new Set([...picked.files, ...all])], TOUR_CHARS);
 		if (!files.length) throw new Error('coee couldn\'t read the files this change would touch.');
 		this.session = {
 			uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, picked.files), plan: question, switchable: true,
 			jobs: [{ where: { file: files[0].path, startLine: 1, endLine: 1, what: 'the plan' }, run: () => this.cached({ plan: question, v: 2, root: root!.toString(), map, approach: picked.approach, code: digest(files) }, () => // v: bump when what a saved plan holds changes (2: code and tests)
-				this.reader.json<Walkthrough>(b => buildPlanPrompt(map, question, picked.approach, files, b), d => repairPlan(d, lines, files))) }],
+				this.reader.json<Walkthrough>(b => buildPlanPrompt(map, question, picked.approach, files, b, picked.files), d => repairPlan(d, lines, files))) }],
 		};
 		await this.runJobs(gen, question, `Change plan · ${name} · ${files.length} files`);
 		void this.refreshSnippets();

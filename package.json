@@ -46,7 +46,8 @@
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test \"out/test/*.test.js\"",
     "package": "npx @vscode/vsce package --no-dependencies --no-rewrite-relative-links",
-    "test:integration": "npm run compile && vscode-test"
+    "test:integration": "npm run compile && vscode-test",
+    "harness": "npm run compile && node --test out/test/harness.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
