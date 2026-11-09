@@ -187,9 +187,11 @@ export class WalkthroughController implements vscode.Disposable {
 	 * so it's instant); else a tour of the project.
 	 */
 	async openWalkthrough(root?: vscode.Uri) {
-		const walking = this.panel && this.state.w && !this.session?.plan && !this.session?.review && this.state.status !== 'planning';
-		if (walking) return this.panel!.reveal(this.panel!.viewColumn, false);
-		const last = this.store.get<Recent[]>(RECENT_KEY, []).find(r => r.kind !== 'plan' && r.kind !== 'review');
+		// The project's Walkthrough tab means a tour of that project: never a file or selection walkthrough left over from before.
+		const s = this.session, same = (u: string) => !root || u === root.toString();
+		const touring = this.panel && this.state.w && s?.switchable && !s.plan && !s.review && same(s.uri.toString());
+		if (touring) return this.panel!.reveal(this.panel!.viewColumn, false);
+		const last = this.store.get<Recent[]>(RECENT_KEY, []).find(r => r.kind === 'tour' && same(r.uri));
 		return last ? this.reopen(last.id) : this.tour(root);
 	}
 
