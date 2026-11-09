@@ -51,6 +51,7 @@ const model = new FakeModel()
 			sequence: { nodes: [{ id: 'c', label: 'Client' }, { id: 's', label: 'server' }], edges: [{ from: 'c', to: 's', label: 'PUT' }] } }],
 		states: [{ name: 'Request', what: 'From received to answered.', diagram: { nodes: [{ id: 'r', label: 'received', detail: 'open' }, { id: 'a', label: 'answered', detail: 'sent' }], edges: [{ from: 'r', to: 'a', label: 'send' }] } }] })
 	.on(/data model/, { what: 'An array of todos.', entities: [{ id: 't', name: 'Todo', kind: 'type', fields: [{ name: 'title', type: 'string' }] }], relations: [] })
+	.on(/business rules and guards of a codebase/, p => ({ rules: [...p.matchAll(/^\[([^\]]+)\]/gm)].map(m => ({ id: m[1], plain: 'A rule, in plain words.' })) }))
 	.on(/application security reviewer/, { summary: 'Pattern hits only.', findings: [], rejected: [] })
 	.on(/reviewing a colleague's change/, p => {
 		const line = Number(/(\d+) \+ .*cache/.exec(p)?.[1] ?? 1);
@@ -82,6 +83,7 @@ suite('coee in VS Code', () => {
 		await vscode.window.showTextDocument(file('server.js'), { viewColumn: vscode.ViewColumn.One });
 		await vscode.commands.executeCommand('coee.architecture', root());
 		await until('the data model request', () => model.count(/data model/) > 0);
+		await until('the plain-words rules request', () => model.count(/business rules and guards of a codebase/) > 0);
 		await vscode.commands.executeCommand('coee.go', 'security', root());
 		await until('the security page', () => coeeGroups()[0]?.tabs.length >= 2);
 		assert.equal(coeeGroups().length, 1, 'coee pages share one group');
