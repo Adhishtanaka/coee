@@ -1518,3 +1518,32 @@ export function buildCommitMessagePrompt(files: FileDiff[], budget = 1e9): strin
 	const head = `Write a git commit message for this change: a subject line under 72 characters in the imperative mood ("Add", "Fix"), a blank line, then 1-3 short lines on what changed and why. Plain text only, no markdown, no quotes around it.\n\n`;
 	return head + compressDiff(files, budget - head.length - 200).text;
 }
+
+// ---------------------------------------------------------------------------
+// Business rules in plain words, for the architecture page
+
+export function buildRulesPrompt(rules: ReadonlyArray<{ id: string; text: string; file: string; line: number; in?: string }>, budget = 1e9): string {
+	const head = `These lines are the business rules and guards of a codebase: checks that reject a request, throw, or validate data.
+For each, write the rule in plain words for someone new to the project, as a short statement of the rule itself (not the code): "a title is required", "only the order's owner can cancel it", "an order can't total more than 10,000", "the request must come from a logged-in user". Name real things from the code. If a line is only error plumbing with no rule (e.g. re-throwing, a generic 500), say "not a business rule".
+
+Reply with ONLY JSON: {"rules": [{"id": string, "plain": string}]}
+
+`;
+	let room = budget - head.length - 200;
+	const lines: string[] = [];
+	for (const r of rules) {
+		const l = `[${r.id}] ${r.file}:${r.line}${r.in ? ` in ${r.in}()` : ''}: ${r.text}`;
+		if (l.length > room) break;
+		lines.push(l);
+		room -= l.length + 1;
+	}
+	return head + lines.join('\n');
+}
+
+/** Plain words by rule id; "not a business rule" drops it from the list. */
+export function repairRules(draft: any, ids: readonly string[]): { value?: Record<string, string>; errors: string[] } {
+	const raw = Array.isArray(draft?.rules) ? draft.rules : [];
+	const out: Record<string, string> = {};
+	for (const r of raw) { const id = str(r?.id, 300), plain = str(r?.plain, 200); if (ids.includes(id) && plain) out[id] = plain; }
+	return Object.keys(out).length || !ids.length ? { value: out, errors: [] } : { errors: ['"rules" must give "plain" words for the rule ids listed'] };
+}

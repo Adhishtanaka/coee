@@ -9,6 +9,7 @@ import { indexProject, outline } from '../codeindex';
 import { packContext } from '../context';
 import { scanText } from '../rules';
 import { planSteps } from '../steps';
+import { projectFacts } from '../facts';
 
 const ROOT = path.join(__dirname, '../../test/fixtures');
 interface Expected {
@@ -63,6 +64,18 @@ for (const name of fs.readdirSync(ROOT).filter(d => fs.existsSync(path.join(ROOT
 			}
 			assert.ok(steps.length <= 12, `${file}: ${steps.length} steps`);
 		}
+	});
+
+	test(`harness ${name}: the architecture page lists every entry point, route, data shape and rule`, () => {
+		const f = projectFacts(idx, new Map(files.map(x => [x.path, x.text])));
+		for (const e of x.entries) assert.ok(f.entries.some(y => y.file === e), `entry ${e}`);
+		for (const [method, file] of x.routes) assert.ok(f.routes.some(r => r.method === method && r.file === file), `route ${method} ${file}`);
+		for (const [file, dto, fields] of x.dtos) {
+			const d = f.dtos.find(y => y.name === dto && y.file === file);
+			assert.ok(d, `data shape ${dto}`);
+			assert.deepEqual(fields.filter(fl => !d!.fields.some(y => y.name === fl)), [], `${dto} fields`);
+		}
+		for (const [file, text] of x.rules) assert.ok(f.rules.some(r => r.file === file && r.text.includes(text)), `rule "${text}"`);
 	});
 
 	test(`harness ${name}: the planted flaws are caught by the rules`, () => {

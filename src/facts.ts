@@ -1,0 +1,95 @@
+// What the architecture page lists about a project, from the code index (no model): entry points, the API, the data
+// shapes (DTOs) and where they're used, the business rules, and which part of the map each belongs to.
+// Pure, so the harness checks every expected route, data shape and rule reaches the page.
+import { Dto, Field, ProjectIndex } from './codeindex';
+
+export interface EntryFact { file: string; why: string }
+export interface RouteFact { method: string; path: string; file: string; line: number; handler?: string; uses: string[]; guards: string[]; part?: string }
+export interface DtoFact { name: string; kind: Dto['kind']; file: string; line: number; end: number; fields: Field[]; usedIn: string[]; validated: boolean; part?: string }
+export interface RuleFact { id: string; text: string; kind: string; file: string; line: number; in?: string; part?: string; plain?: string }
+export interface Facts { entries: EntryFact[]; routes: RouteFact[]; dtos: DtoFact[]; rules: RuleFact[] }
+
+/** Which part of the map a file belongs to (the first part that lists it, or shares its folder). */
+export function partOf(parts: ReadonlyArray<{ id: string; files: ReadonlyArray<{ path: string }> }>, file: string): string | undefined {
+	const exact = parts.find(c => c.files.some(f => f.path === file));
+	if (exact) return exact.id;
+	const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : '';
+	return parts.find(c => c.files.some(f => (f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '') === dir))?.id;
+}
+
+export function projectFacts(idx: ProjectIndex, texts: ReadonlyMap<string, string>, parts: ReadonlyArray<{ id: string; files: ReadonlyArray<{ path: string }> }> = []): Facts {
+	const files = [...idx.files.values()];
+	const dtoNames = files.flatMap(f => f.dtos.filter(d => d.kind !== 'object').map(d => d.name));
+	const rules: RuleFact[] = files.flatMap(f => f.rules.map((r, i) => ({ id: `${f.path}#${i + 1}`, text: r.text, kind: r.kind, file: f.path, line: r.line, in: r.in, part: partOf(parts, f.path) })));
+	const routes: RouteFact[] = files.flatMap(f => {
+		const lines = texts.get(f.path)?.split('\n') ?? [];
+		return f.routes.map(r => {
+			// The handler: the function the route line sits in, or the next lines up to the next route (inline handlers).
+			const sym = f.symbols.find(s => s.line <= r.line && r.line <= s.end && s.kind !== 'class' && s.end - s.line < 400);
+			const next = f.routes.map(x => x.line).filter(l => l > r.line).sort((a, b) => a - b)[0] ?? r.line + 25;
+			const body = lines.slice(r.line - 1, Math.min(next - 1, r.line + 40)).join('\n');
+			const guards = rules.filter(x => x.file === f.path && x.line >= r.line && x.line < next).map(x => x.text);
+			const middleware = (lines[r.line - 1] ?? '').match(/,\s*([a-z]\w*(?:Auth|User|Login|Admin|Role|Token|Guard|Permission)\w*)\s*,/i)?.[1];
+			return { method: r.method, path: r.path, file: f.path, line: r.line, handler: sym?.name, part: partOf(parts, f.path),
+				uses: dtoNames.filter(n => new RegExp(`\\b${n}\\b`).test(body)), guards: middleware ? [`${middleware} (middleware)`, ...guards] : guards };
+		});
+	});
+	const dtos: DtoFact[] = files.flatMap(f => f.dtos.map(d => {
+		const re = new RegExp(`\\b${d.name}\\b`);
+		const usedIn = d.kind === 'object' ? [] : [...texts].filter(([p, t]) => p !== f.path && re.test(t)).map(([p]) => p);
+		return { name: d.name, kind: d.kind, file: f.path, line: d.line, end: d.end, fields: d.fields, usedIn, part: partOf(parts, f.path),
+			validated: d.kind === 'schema' || d.kind === 'model' || [...texts.values()].some(t => new RegExp(`\\b${d.name}\\.(safeParse|parse|validate|parseAsync)\\b`).test(t)) };
+	}));
+	// Mount points: app.use('/orders', requireUser, ordersRouter) puts the router's routes under '/orders', behind requireUser.
+	for (const f of files) {
+		for (const m of (texts.get(f.path) ?? '').matchAll(/\.use\(\s*['"`](\/[^'"`]*)['"`]\s*,([^)]*)\)/g)) {
+			const args = m[2].split(',').map(a => a.trim()).filter(a => /^[A-Za-z_$][\w$]*$/.test(a));
+			const router = args[args.length - 1], middleware = args.slice(0, -1);
+			const owner = router && files.find(o => (texts.get(o.path) ?? '').match(new RegExp(`\\b(?:const|let|var)\\s+${router}\\s*=`)));
+			if (!owner) continue;
+			for (const r of routes) {
+				if (r.file !== owner.path) continue;
+				if (!r.path.startsWith(m[1])) r.path = (m[1] + (r.path === '/' ? '' : r.path)) || '/';
+				r.guards.unshift(...middleware.map(x => `${x} (middleware on ${m[1]})`));
+			}
+		}
+	}
+	const entries = files.filter(f => f.entry).map(f => ({ file: f.path, why: f.entry! }));
+	return { entries, routes, dtos, rules };
+}
+
+/** For one use case (its code ranges), the rules it applies and the data shapes it handles, following the calls it makes. */
+export function flowFacts(idx: ProjectIndex, facts: Facts, refs: ReadonlyArray<{ path: string; startLine?: number; endLine?: number }>, texts: ReadonlyMap<string, string>): { rules: RuleFact[]; dtos: string[] } {
+	const ranges: Array<[string, number, number]> = [];
+	const seen = new Set<string>();
+	const add = (file: string, a: number, b: number, depth: number) => {
+		const key = `${file}:${a}`;
+		if (seen.has(key) || depth > 3) return;
+		seen.add(key);
+		ranges.push([file, a, b]);
+		const fi = idx.files.get(file);
+		for (const s of fi?.symbols ?? []) {
+			if (s.line < a || s.line > b) continue;
+			// Follow the calls the code makes into other functions, so rules in the services it uses count too.
+			for (const name of fi!.calls[s.name] ?? []) for (const where of idx.definedIn.get(name) ?? []) {
+				const t = idx.files.get(where)!.symbols.find(x => x.name === name);
+				if (t) add(where, t.line, t.end, depth + 1);
+			}
+		}
+		const body = (texts.get(file) ?? '').split('\n').slice(a - 1, b).join('\n');
+		for (const fi2 of idx.files.values()) for (const s of fi2.symbols) if (s.kind !== 'class' && body.includes(`${s.name}(`)) add(fi2.path, s.line, s.end, depth + 1);
+	};
+	for (const r of refs) {
+		const fi = idx.files.get(r.path);
+		if (!fi) continue;
+		const a = r.startLine ?? 1, b = r.endLine ?? fi.lines;
+		// A one-line reference means the function around it.
+		const sym = fi.symbols.find(s => s.line <= a && b <= s.end && s.kind !== 'class');
+		add(r.path, sym && b - a < 3 ? sym.line : a, sym && b - a < 3 ? sym.end : b, 0);
+	}
+	const inRange = (file: string, line: number) => ranges.some(([f, a, b]) => f === file && a <= line && line <= b);
+	const rules = facts.rules.filter(r => inRange(r.file, r.line));
+	const body = ranges.map(([f, a, b]) => (texts.get(f) ?? '').split('\n').slice(a - 1, b).join('\n')).join('\n');
+	const dtos = facts.dtos.filter(d => d.kind !== 'object' && new RegExp(`\\b${d.name}\\b`).test(body)).map(d => d.name);
+	return { rules, dtos: [...new Set(dtos)] };
+}

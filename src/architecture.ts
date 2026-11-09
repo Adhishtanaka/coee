@@ -2,19 +2,21 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import {
-	ArchDoc, Behavior, DataModel, Diagram, FolderFile, SystemMap, buildArchitecturePrompt, buildBehaviorPrompt, buildDataModelPrompt, mapDiagram,
+	ArchDoc, Behavior, DataModel, Diagram, FolderFile, SystemMap, buildRulesPrompt, repairRules, buildArchitecturePrompt, buildBehaviorPrompt, buildDataModelPrompt, mapDiagram,
 	repairArchitecture, repairBehavior, repairDataModel, snapRefs,
 } from './prompt';
 import { diagramSvg, erSvg } from './layout';
 import { Lm, isCancel, log } from './lm';
 import { MapController, SOURCE, pickProject, read, sourceFiles } from './map';
 import { BIG, Subsystem, detectSubsystems } from './subsystems';
+import { indexProject } from './codeindex';
+import { Facts, RuleFact, flowFacts, projectFacts } from './facts';
 import { TOUR_CHARS, digest, projectFiles, readFiles } from './walkthrough';
 import { createPanel, page, showLines } from './ui';
 
 const CACHE_KEY = 'coee.architecture';
 const CACHE_SIZE = 15;
-const VERSION = 2; // bump when what a saved page holds changes (2: code ranges are checked against the file)
+const VERSION = 3; // 3: facts and plain-word rules; bump when what a saved page holds changes (2: code ranges are checked against the file)
 
 /** What the page shows. Diagrams arrive as SVG drawn here, in the current theme. */
 interface PageState {
@@ -34,6 +36,10 @@ interface PageState {
 	/** How much code the page read. */
 	coverage?: { read: number; total: number };
 	answer?: { q: string; text?: string; refs: Array<{ path: string; line: number; text: string }>; busy?: boolean; error?: string };
+	/** From the code index (no model): entry points, API routes, data shapes and business rules, by part. */
+	facts?: Facts;
+	/** Per use case: the rules it applies and the data shapes it handles (following its calls). */
+	flows?: Array<{ rules: RuleFact[]; dtos: string[] }>;
 }
 
 /**
@@ -191,6 +197,10 @@ export class ArchitectureController implements vscode.Disposable {
 			this.files = files;
 			this.state.coverage = { read: files.length, total: all.length };
 			const known = files.map(f => f.path);
+			// The facts come from the code itself, at once: entry points, the API, data shapes and rules.
+			const idx = indexProject(files), texts = new Map(files.map(f => [f.path, f.text]));
+			const facts = projectFacts(idx, texts, map.components);
+			this.show({ facts });
 			const key = { v: VERSION, root: root.toString(), map, code: digest(files) };
 			const doc = await this.cached({ ...key, part: 'doc' }, fresh, async () => { const d = await this.lm.json<ArchDoc>(b => buildArchitecturePrompt(map, files, b), d => repairArchitecture(d, map, known)); return { ...d, components: d.components.map(c => ({ ...c, keyFiles: snapRefs(c.keyFiles, files) })) }; });
 			if (gen !== this.gen) return;
@@ -198,10 +208,21 @@ export class ArchitectureController implements vscode.Disposable {
 			const behavior = await this.cached({ ...key, part: 'behavior' }, fresh, async () => { const b = await this.lm.json<Behavior>(b => buildBehaviorPrompt(map, files, b), d => repairBehavior(d, known)); return { ...b, useCases: b.useCases.map(u => ({ ...u, files: snapRefs(u.files, files) })) }; });
 			if (gen !== this.gen) return;
 			const missing = [behavior.useCases.length < 2 ? 'fewer than two use cases' : '', behavior.states.length ? '' : 'no state diagram'].filter(Boolean);
-			this.show({ behavior: this.withSvgs(behavior), reading: 'the data model', behaviorNote: missing.length ? `The model came back with ${missing.join(' and ')}. Regenerate to try again.` : undefined });
+			const flows = behavior.useCases.map(u => flowFacts(idx, facts, u.files, texts));
+			this.show({ flows, behavior: this.withSvgs(behavior), reading: 'the data model', behaviorNote: missing.length ? `The model came back with ${missing.join(' and ')}. Regenerate to try again.` : undefined });
 			const data = await this.cached({ ...key, part: 'data' }, fresh, () => this.lm.json<DataModel>(b => buildDataModelPrompt(map, files, b), d => repairDataModel(d, known)));
 			if (gen !== this.gen) return;
-			this.show({ data: this.withErSvg(data), reading: undefined });
+			this.show({ data: this.withErSvg(data), reading: facts.rules.length ? 'the business rules' : undefined });
+			// The rules in plain words (one small request); the code itself is shown if this fails.
+			if (facts.rules.length) {
+				const list = facts.rules.slice(0, 80);
+				const plain = await this.cached({ ...key, part: 'rules' }, fresh, () => this.lm.json<Record<string, string>>(b => buildRulesPrompt(list, b), d => repairRules(d, list.map(r => r.id)))).catch(err => { if (isCancel(err)) throw err; log.warn(`rules: ${err}`); return {} as Record<string, string>; });
+				if (gen !== this.gen) return;
+				const named = (r: RuleFact) => ({ ...r, plain: plain[r.id] });
+				const keep = (r: RuleFact) => !/not a business rule/i.test(r.plain ?? '');
+				this.show({ facts: { ...facts, rules: facts.rules.map(named).filter(keep) }, flows: this.state.flows?.map(f => ({ ...f, rules: f.rules.map(named).filter(keep) })) });
+			}
+			this.show({ reading: undefined });
 		} catch (err) {
 			if (gen !== this.gen || isCancel(err)) return;
 			const msg = err instanceof Error ? err.message : String(err);
@@ -297,6 +318,29 @@ figcaption { font-size: .88em; color: var(--muted); text-align: center; }
 .card { display: grid; gap: 8px; align-content: start; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--vscode-editorWidget-background); scroll-margin: 80px; }
 .card .link.small { justify-self: start; font-size: .88em; }
 .flash { animation: flash 1.6s ease-out; }
+.tablewrap { overflow-x: auto; }
+table.facts { border-collapse: collapse; width: 100%; font-size: .92em; }
+table.facts th { text-align: left; font-size: .78em; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 6px 10px; border-bottom: 1px solid var(--line); }
+table.facts td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.method { font-family: var(--mono); font-size: .8em; font-weight: 700; padding: 1px 6px; border-radius: 3px; border: 1px solid currentColor; }
+.m-get { color: var(--vscode-charts-blue, #4fa3ff); } .m-post { color: var(--vscode-charts-green, #3fb950); } .m-put, .m-patch { color: var(--vscode-charts-yellow, #d29922); } .m-delete { color: var(--vscode-charts-red, #f14c4c); }
+.guards { margin: 0; padding-left: 16px; font-family: var(--mono); font-size: .88em; }
+.guards li.plain { font-family: var(--vscode-font-family); font-size: 1.05em; }
+.rulegroup { display: grid; gap: 6px; }
+.rulelist { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.rulelist li { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.rulelist .md p { margin: 0; }
+.rk { font-size: .72em; text-transform: uppercase; letter-spacing: .06em; padding: 0 6px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted); min-width: 6em; text-align: center; }
+.rk-auth { color: var(--vscode-charts-red, #f14c4c); border-color: currentColor; } .rk-limit { color: var(--vscode-charts-yellow, #d29922); border-color: currentColor; } .rk-validation { color: var(--vscode-charts-blue, #4fa3ff); border-color: currentColor; }
+table.fields { border-collapse: collapse; font-size: .9em; }
+table.fields td { padding: 2px 12px 2px 0; }
+.badge.ok { font-size: .72em; margin-left: 8px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--vscode-testing-iconPassed, #3fb950); color: var(--vscode-testing-iconPassed, #3fb950); }
+.small { font-size: .8em; font-weight: 400; }
+.cchips { display: flex; gap: 6px; flex-wrap: wrap; }
+.cchip { border: 1px solid var(--line); border-radius: 999px; padding: 0 9px; background: none; color: var(--link); font-size: .85em; }
+.flowrules h4 { font-size: .76em; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+.flowrules ol { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.flowrules .md { display: inline; } .flowrules .md p { display: inline; }
 .crumbs { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: .92em; }
 .ask { display: flex; gap: 8px; }
 .ask input { flex: 1; }
@@ -355,9 +399,9 @@ function render() {
     el('button', { className: 'tool', onclick: () => send('switch') }, 'Other codebase…'),
     el('button', { className: 'tool', title: 'Read the code again and rewrite this page', onclick: () => send('regenerate') }, '↻ Regenerate'));
   if (!map) { root.replaceChildren(bar, el('div', { className: 'wrap' }, el('span'), st.error ? el('p', { className: 'error' }, st.error) : reading(st.reading || 'the project'))); return; }
-  const subs = st.subsystems;
+  const subs = st.subsystems, F = st.facts;
   const toc = el('nav', { className: 'toc' }, ...(subs ? [['overview', 'Overview'], ['ask', 'Find'], ['how', 'How it works'], ['arch', 'Architecture'], ['packages', 'Packages'], ['conv', 'Conventions']]
-    : [['overview', 'Overview'], ['ask', 'Find'], ['how', 'How it works'], ['arch', 'Architecture'], ['parts', 'Components'], ['uses', 'Use cases'], ['states', 'States'], ['data', 'Data model'], ['conv', 'Conventions']])
+    : [['overview', 'Overview'], ['ask', 'Find'], ['how', 'How it works'], ['entry', 'Where it starts'], ['arch', 'Architecture'], ['parts', 'Components'], ['api', 'API'], ['uses', 'Use cases'], ['rules', 'Business rules'], ['data', 'Data'], ['states', 'States'], ['conv', 'Conventions']])
     .map(([id, label]) => el('button', { className: 'link', onclick: () => go(id) }, label)));
   const a = st.answer;
   const askBox = el('form', { className: 'ask', onsubmit: e => { e.preventDefault(); const q = e.target.q.value.trim(); if (q) send('ask', { q }); } },
@@ -375,6 +419,10 @@ function render() {
     el('section', { id: 'how' }, el('h2', {}, 'How it works'),
       doc ? el('div', { className: 'prose' }, withTerms(md(doc.howItWorks))) : reading('how it works'),
       doc && doc.terms ? el('dl', { className: 'terms' }, ...doc.terms.flatMap(t => [el('dt', {}, t.name), el('dd', {}, t.meaning)])) : null),
+    !subs && F && F.entries.length ? el('section', { id: 'entry' }, el('h2', {}, 'Where it starts'),
+      el('p', { className: 'muted' }, 'Where execution begins: read these first.'),
+      el('div', { className: 'files' }, ...F.entries.map(e => fileLink({ path: e.file, why: e.why })), ),
+      el('p', { className: 'note' }, F.entries.map(e => e.file + ': ' + e.why).join(' · '))) : null,
     el('section', { id: 'arch' }, el('h2', {}, 'Architecture'),
       el('p', { className: 'muted' }, subs ? 'The packages this repository is made of, and which use which.' : 'Every part of the project and what passes between them.'),
       figure(st.archSvg, 'How the parts of ' + map.title + ' connect'),
@@ -393,23 +441,53 @@ function render() {
         const out = map.connections.filter(e => e.from === c.id), inc = map.connections.filter(e => e.to === c.id);
         const card = el('div', { className: 'card', id: 'c-' + c.id }, el('h3', {}, c.name),
           el('p', {}, (d && d.role) || c.description || c.summary),
+          F ? (() => { const n = (list) => list.filter(x => x.part === c.id).length, r = n(F.routes), ru = n(F.rules), dt = n(F.dtos.filter(x => x.kind !== 'object')), en = F.entries.some(e => c.files.some(f => f.path === e.file));
+            return r || ru || dt || en ? el('div', { className: 'cchips' }, en ? el('button', { className: 'cchip', onclick: () => go('entry') }, 'entry point') : null,
+              r ? el('button', { className: 'cchip', onclick: () => go('api') }, r + ' route' + (r === 1 ? '' : 's')) : null,
+              ru ? el('button', { className: 'cchip', onclick: () => go('rules') }, ru + ' rule' + (ru === 1 ? '' : 's')) : null,
+              dt ? el('button', { className: 'cchip', onclick: () => go('data') }, dt + ' data shape' + (dt === 1 ? '' : 's')) : null) : null; })() : null,
           (d && d.keyFiles.length ? d.keyFiles : c.files.slice(0, 3)).length ? el('div', { className: 'files' }, ...(d && d.keyFiles.length ? d.keyFiles : c.files.slice(0, 3)).map(fileLink)) : null,
           out.length || inc.length ? el('p', { className: 'links' }, [...out.map(e => '→ ' + name(e.to) + (e.label ? ' (' + e.label + ')' : '')), ...inc.map(e => '← ' + name(e.from))].join(' · ')) : null,
           el('button', { className: 'link small', title: 'Step through this part in the editor', onclick: () => send('walk', { id: c.id }) }, 'Walk me through'));
         return card;
       }))),
+    !subs && F && F.routes.length ? el('section', { id: 'api' }, el('h2', {}, 'API'),
+      el('p', { className: 'muted' }, 'Every route, its handler, the data it takes, and what guards it.'),
+      el('div', { className: 'tablewrap' }, el('table', { className: 'facts' },
+        el('thead', {}, el('tr', {}, ...['Route', 'Handler', 'Data', 'Guards'].map(h => el('th', {}, h)))),
+        el('tbody', {}, ...F.routes.map(r => el('tr', {},
+          el('td', {}, el('span', { className: 'method m-' + r.method.toLowerCase() }, r.method), ' ', el('code', {}, r.path)),
+          el('td', {}, fileLink({ path: r.file, startLine: r.line, why: r.handler || '' }), r.handler ? el('div', { className: 'muted mono' }, r.handler + '()') : null),
+          el('td', {}, ...(r.uses.length ? r.uses.map(u => el('button', { className: 'link mono', onclick: () => go('d-' + u) }, u + ' ')) : [el('span', { className: 'muted' }, '–')])),
+          el('td', {}, r.guards.length ? el('ul', { className: 'guards' }, ...r.guards.slice(0, 4).map(g => { const p = (F.rules.find(x => x.text === g) || {}).plain; return el('li', { className: p ? 'plain' : '' }, p || (g.length > 90 ? g.slice(0, 89) + '…' : g)); })) : el('span', { className: 'muted' }, 'none found')))))))) : null,
     subs ? null : el('section', { id: 'uses' }, el('h2', {}, 'Use cases'),
       behavior ? el('p', { className: 'muted' }, 'What people do with it, and how each one flows through the code.') : reading(st.reading === 'use cases and lifecycles' ? 'use cases' : 'use cases (after how it works)'),
       ...(behavior ? behavior.useCases.map((u, k) => el('div', { className: 'uc', id: 'uc-' + k },
         el('div', { className: 'head' }, el('h3', {}, u.name), el('button', { className: 'link small', title: 'Step through this in the editor', onclick: () => send('walk', { useCase: k }) }, 'Walk me through')), u.who ? el('span', { className: 'who' }, 'Who: ' + u.who) : null,
         u.steps.length ? el('ol', {}, ...u.steps.map(x => el('li', {}, withTerms(md(x))))) : null,
         figure(behavior.svgs.useCases[k], 'Sequence: ' + u.name),
+        st.flows && st.flows[k] && st.flows[k].rules.length ? el('div', { className: 'flowrules' }, el('h4', {}, 'Rules applied, in order'),
+          el('ol', {}, ...st.flows[k].rules.map(r => el('li', {}, r.plain ? withTerms(md(r.plain)) : el('code', {}, r.text), ' ', fileLink({ path: r.file, startLine: r.line, why: r.in || '' }))))) : null,
+        st.flows && st.flows[k] && st.flows[k].dtos.length ? el('p', { className: 'links' }, 'Data: ', ...st.flows[k].dtos.map(n => el('button', { className: 'link mono', onclick: () => go('d-' + n) }, n + ' '))) : null,
         u.files.length ? el('div', { className: 'files' }, ...u.files.map(fileLink)) : null)) : [])),
     subs ? null : el('section', { id: 'states' }, el('h2', {}, 'States'),
       behavior ? null : reading('lifecycles'),
       ...(behavior ? behavior.states.map((x, k) => el('div', { className: 'uc' }, el('h3', {}, x.name), x.what ? withTerms(md(x.what)) : null, figure(behavior.svgs.states[k], 'States of ' + x.name))) : []),
       st.behaviorNote ? el('p', { className: 'note' }, st.behaviorNote) : null),
-    subs ? null : el('section', { id: 'data' }, el('h2', {}, 'Data model'),
+    !subs && F && F.rules.length ? el('section', { id: 'rules' }, el('h2', {}, 'Business rules'),
+      el('p', { className: 'muted' }, 'The checks the code enforces, by part: what is required, who may do what, and the limits.'),
+      ...[...new Set(F.rules.map(r => r.part || ''))].map(part => el('div', { className: 'rulegroup' },
+        el('h3', {}, part ? name(part) : 'Elsewhere'),
+        el('ul', { className: 'rulelist' }, ...F.rules.filter(r => (r.part || '') === part).map(r => el('li', {},
+          el('span', { className: 'rk rk-' + r.kind }, r.kind),
+          el('span', {}, r.plain ? withTerms(md(r.plain)) : el('code', {}, r.text)),
+          fileLink({ path: r.file, startLine: r.line, why: r.in ? 'in ' + r.in : '' }))))))) : null,
+    subs ? null : el('section', { id: 'data' }, el('h2', {}, 'Data'),
+      F && F.dtos.filter(d => d.kind !== 'object' || d.fields.length > 1).length ? el('div', { className: 'cards' }, ...F.dtos.filter(d => d.kind !== 'object' || d.fields.length > 1).map(d => el('div', { className: 'card', id: 'd-' + d.name },
+        el('h3', {}, d.name, ' ', el('span', { className: 'muted small' }, d.kind === 'object' ? 'record built in code' : d.kind), d.validated ? el('span', { className: 'badge ok', title: 'Checked against a schema before use' }, 'validated') : null),
+        el('table', { className: 'fields' }, ...d.fields.map(f => el('tr', {}, el('td', { className: 'mono' }, f.name + (f.optional ? '?' : '')), el('td', { className: 'muted mono' }, f.type || '')))),
+        el('div', { className: 'files' }, fileLink({ path: d.file, startLine: d.line, endLine: d.end, why: 'defined here' })),
+        d.usedIn.length ? el('p', { className: 'links' }, 'Used in ' + d.usedIn.join(', ')) : null))) : null,
       st.data ? (st.data.what ? el('div', { className: 'prose' }, withTerms(md(st.data.what))) : null) : reading(behavior ? 'the data model' : 'the data model (after use cases)'),
       st.data ? figure(st.data.svg, 'Entities and how they relate (PK: identifier, FK: reference to another entity)') : null,
       st.data && st.data.entities.some(e => e.file) ? el('div', { className: 'files' }, ...st.data.entities.filter(e => e.file).map(e => fileLink({ ...e.file, why: e.name }))) : null),
