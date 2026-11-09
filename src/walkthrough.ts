@@ -506,7 +506,7 @@ export class WalkthroughController implements vscode.Disposable {
 			})),
 		];
 		this.session = { uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, wanted), jobs, switchable: true };
-		await this.runJobs(gen, one ? `Walking through ${one.name}` : `Touring ${name}`, `${map.title} · ${one ? one.name : `${components.length} parts`}`, [...one ? [] : ['Overview', 'Use cases'], ...components.map(c => c.name)]);
+		await this.runJobs(gen, one ? `Walking through ${one.name}` : `Touring ${name}`, `${map.title} · ${one ? one.name : `${jobs.length} parts`}`, [...one ? [] : ['Overview', 'Use cases'], ...components.map(c => c.name)]);
 	}
 
 	private diagramPanel?: vscode.WebviewPanel;
@@ -1094,7 +1094,9 @@ main { padding: 20px 28px 0; }
 main:has(.walk) { padding: 0; height: 100vh; }
 .walk { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--vscode-editor-background); }
 .pad { padding: 24px; }
-.navrow { padding: 6px 12px; border-bottom: 1px solid var(--line); display: flex; }
+.navrow { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; }
+/* On padded pages (loading, error, planning) the switcher spans the full width and lines up with the content below it. */
+main:not(:has(.walk)) > .navrow { margin: -20px -28px 28px; padding: 8px 28px; }
 .tabbar { display: flex; flex-wrap: wrap; align-items: stretch; border-bottom: 1px solid var(--line); background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-sideBar-background)); min-height: 34px; }
 .ftabs { display: flex; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none; }
 .ftab { border: 0; background: none; color: var(--muted); padding: 0 14px; white-space: nowrap; border-right: 1px solid var(--line); font-size: .92em; }
@@ -1217,7 +1219,16 @@ body.vscode-light .tk { color: #0b5cad; } body.vscode-light .ts { color: #1a7f37
 .finish ol { margin: 0; padding-left: 22px; display: grid; gap: 4px; }
 main .head h2 { font-size: 1.3em; }
 
-.loading { display: grid; gap: 12px; }
+.loading { display: grid; gap: 18px; max-width: 640px; }
+.loading .head { margin: 0; gap: 10px; }
+.loading .sweep { height: 3px; }
+.loading .status { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.loading .status p { margin: 0; line-height: 1.5; }
+.loading .steps { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: .92em; }
+.loading .steps li { display: flex; gap: 10px; align-items: baseline; color: var(--muted); }
+.loading .steps li.now { color: var(--vscode-foreground); font-weight: 600; }
+.loading .steps li .dot { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--muted); flex: none; transform: translateY(-1px); }
+.loading .steps li.now .dot { background: var(--link); border-color: var(--link); }
 kbd { font-family: var(--mono); font-size: .9em; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; }
 `;
 
@@ -1586,9 +1597,14 @@ function render() {
   if (st.status === 'planning') { show(planScreen()); return; }
   if (st.status === 'empty') { show(); return; }
   if (st.status === 'loading') {
-    show(el('section', { className: 'loading' }, header(), el('div', { className: 'sweep', 'aria-hidden': 'true' }),
-      el('p', { className: 'muted' }, st.reading ? 'Reading ' + st.reading + '. The rest follows while you read.' : 'Working out what to explain first.'),
-      el('div', {}, el('button', { className: 'btn quiet', onclick: () => send('cancel') }, 'Stop'))));
+    // While the first part is read: what's happening, the parts to come (a tour's overview, use cases, components), Stop.
+    const now = st.progress ? st.progress.done : 0;
+    show(el('section', { className: 'loading' }, header(),
+      el('div', { className: 'sweep', 'aria-hidden': 'true' }),
+      el('div', { className: 'status' },
+        el('p', { className: 'muted' }, st.reading ? 'Reading ' + st.reading + '. You can start as soon as it\'s ready; the rest follows while you read.' : 'Working out what to explain first.'),
+        el('button', { className: 'btn quiet', onclick: () => send('cancel') }, 'Stop')),
+      st.parts && st.parts.length > 1 ? el('ol', { className: 'steps', 'aria-label': 'Parts' }, ...st.parts.map((p, k) => el('li', { className: k === now ? 'now' : '' }, el('span', { className: 'dot' }), p))) : null));
     return;
   }
   if (st.status === 'error') {
