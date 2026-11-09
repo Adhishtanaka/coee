@@ -75,3 +75,19 @@ for (const name of fs.readdirSync(ROOT).filter(d => fs.existsSync(path.join(ROOT
 }
 
 after(() => { if (report.length) console.log('\ncoee harness\n' + report.join('\n')); });
+
+test('the index stays fast on hostile lines (no catastrophic backtracking)', async () => {
+	const { indexFile } = await import('../codeindex');
+	const nasty = [
+		'public ' + ' '.repeat(390) + 'x',
+		'static '.repeat(55) + 'x',
+		'int' + ' *'.repeat(195) + 'x',
+		'a b'.repeat(130) + '(',
+		'f(' + ' '.repeat(395),
+	];
+	for (const [file, line] of nasty.flatMap(l => [['A.java', l], ['a.c', l], ['a.ts', l], ['a.py', l]] as const)) {
+		const t = Date.now();
+		indexFile(file, Array(50).fill(line).join('\n'));
+		assert.ok(Date.now() - t < 200, `${file}: ${line.slice(0, 20)}… took ${Date.now() - t} ms`);
+	}
+});

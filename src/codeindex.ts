@@ -57,9 +57,11 @@ const SYMBOLS: Record<Lang, Array<[RegExp, Sym['kind']]>> = {
 	],
 	py: [[/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/, 'function'], [/^\s*class\s+([A-Za-z_]\w*)/, 'class']],
 	go: [[/^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(/, 'function'], [/^type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b/, 'class']],
-	java: [[/^\s*(?:public|private|protected|internal|static|final|abstract|sealed|partial|data|open|\s)*(?:class|interface|enum|record|object|struct)\s+([A-Za-z_]\w*)/, 'class'],
-		[/^\s*(?:public|private|protected|internal|static|final|abstract|synchronized|override|async|virtual|suspend|fun|func|\s)+[\w<>\[\],.?\s]*?\b([A-Za-z_]\w*)\s*\([^;]*\)\s*(?:throws[^{]*)?\{?\s*$/, 'method']],
-	c: [[/^(?!\s)(?:static\s+|inline\s+|extern\s+|const\s+|unsigned\s+|signed\s+|struct\s+)*[A-Za-z_][\w\s*]*?\**\b([A-Za-z_]\w*)\s*\([^;]*\)\s*\{?\s*$/, 'function']],
+	// Modifiers are whole words each followed by whitespace, and the return type is one token: no two repeats can match
+	// the same characters, so a crafted line can't make these backtrack (ReDoS).
+	java: [[/^\s*(?:(?:public|private|protected|internal|static|final|abstract|sealed|partial|data|open)\s+)*(?:class|interface|enum|record|object|struct)\s+([A-Za-z_]\w*)/, 'class'],
+		[/^\s*(?:(?:public|private|protected|internal|static|final|abstract|synchronized|override|async|virtual|suspend|fun|func)\s+)*(?:[\w<>\[\],.?]+\s+)?([A-Za-z_]\w*)\s*\([^;)]*\)\s*(?:throws\s+[\w.,\s]+)?\{?\s*$/, 'method']],
+	c: [[/^(?:(?:static|inline|extern|const|unsigned|signed|struct)\s+)*[A-Za-z_]\w*(?:\s+\**|\s*\*+\s*)([A-Za-z_]\w*)\s*\([^;)]*\)\s*\{?\s*$/, 'function']],
 	rust: [[/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)/, 'function'], [/^\s*(?:pub\s+)?(?:struct|enum|trait|impl)\s+([A-Za-z_]\w*)/, 'class']],
 	ruby: [[/^\s*def\s+(?:self\.)?([A-Za-z_]\w*[?!]?)/, 'function'], [/^\s*class\s+([A-Z]\w*)/, 'class']],
 	php: [[/^\s*(?:public|private|protected|static|\s)*function\s+([A-Za-z_]\w*)/, 'function'], [/^\s*(?:abstract\s+|final\s+)?class\s+([A-Za-z_]\w*)/, 'class']],
@@ -110,7 +112,7 @@ export function indexFile(path: string, text: string): FileIndex {
 	const test = TEST_FILE.test(path);
 	let urlPath = '';
 	lines.forEach((raw, i) => {
-		if (raw.length > 1500 || COMMENT.test(raw)) return;
+		if (raw.length > 400 || COMMENT.test(raw)) return; // minified or generated, and keeps every pattern's work small
 		const line = i + 1;
 		// Imports: relative ones are resolved later against the file list.
 		for (const m of raw.matchAll(/(?:require\(\s*|from\s+|import\s+)['"]([^'"]+)['"]/g)) f.imports.push(m[1]);
