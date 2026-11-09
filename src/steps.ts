@@ -146,18 +146,30 @@ export function planSteps(file: string, text: string, first: number, last: numbe
 }
 
 /**
- * A step the model placed (tours, plans, folders): if it points into part of a function, it covers the whole function
- * (with its decorators); blank lines at its edges are trimmed. A range that already spans several functions is kept.
+ * A step the model placed (tours, plans, folders), made to highlight whole code: a range that starts or ends inside a
+ * function grows to that whole function (decorators included), so a highlight never stops halfway through one.
+ * Blank lines at the edges are trimmed. A range that would grow past 120 lines keeps its own edges.
+ * Also returns key lines: the model's, kept if inside the range; else, for a longer range, the rules in it (the
+ * checks it's usually about), so the eye knows where to look.
  */
-export function snapRange(file: string, text: string, startLine: number, endLine: number): { startLine: number; endLine: number } {
+export function snapRange(file: string, text: string, startLine: number, endLine: number, keyLines: ReadonlyArray<{ line: number; note: string }> = []): { startLine: number; endLine: number; keyLines?: Array<{ line: number; note: string }> } {
 	const lines = text.split('\n');
 	const fi = indexProject([{ path: file, text }]).files.get(file)!;
 	const syms = withRoutes(withHeaders(fi.symbols, lines), fi.routes, lines).filter(s => s.kind !== 'class');
-	// The smallest function that contains the start; if the range stays within it, show all of it (up to 80 lines).
-	const home = syms.filter(s => s.line <= startLine && startLine <= s.end).sort((a, b) => (a.end - a.line) - (b.end - b.line))[0];
-	let a = startLine, b = endLine;
-	if (home && endLine <= home.end && home.end - home.line < 80) { a = home.line; b = home.end; }
+	const innermost = (l: number) => syms.filter(s => s.line <= l && l <= s.end).sort((x, y) => (x.end - x.line) - (y.end - y.line))[0];
+	let a = startLine, b = Math.max(startLine, endLine);
+	const top = innermost(a), bottom = innermost(b);
+	const na = top ? Math.min(a, top.line) : a, nb = bottom ? Math.max(b, bottom.end) : b;
+	if (nb - na < 120) { a = na; b = nb; }
 	while (a < b && !lines[a - 1]?.trim()) a++;
 	while (b > a && !lines[b - 1]?.trim()) b--;
-	return { startLine: a, endLine: b };
+	let keys = keyLines.filter(k => k.line >= a && k.line <= b).slice(0, 4);
+	if (!keys.length && b - a >= 6) {
+		keys = fi.rules.filter(r => r.line >= a && r.line <= b).slice(0, 4).map(r => {
+			// The error message is usually the longest string on the line ("a paid order cannot be cancelled", not "paid").
+			const msg = [...r.text.matchAll(/['"`]([^'"`]{3,70})['"`]/g)].map(m => m[1]).sort((x, y) => y.length - x.length)[0];
+			return { line: r.line, note: msg ? `stops it: "${msg}"` : r.kind === 'auth' ? 'checks who is asking' : r.kind === 'limit' ? 'enforces a limit' : 'checks the input' };
+		});
+	}
+	return keys.length ? { startLine: a, endLine: b, keyLines: keys } : { startLine: a, endLine: b };
 }

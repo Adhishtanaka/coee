@@ -196,7 +196,7 @@ export class WalkthroughController implements vscode.Disposable {
 	/** Steps the model placed in files snap to whole functions, so the highlight covers the code the text is about. */
 	private snapped(w: Walkthrough, files: FolderFile[]): Walkthrough {
 		const byPath = new Map(files.map(f => [f.path, f.text]));
-		return { ...w, scenes: w.scenes.map(s => { const t = s.file && byPath.get(s.file); return t ? { ...s, ...snapRange(s.file!, t, s.startLine, s.endLine) } : s; }) };
+		return { ...w, scenes: w.scenes.map(s => { const t = s.file && byPath.get(s.file); return t ? { ...s, ...snapRange(s.file!, t, s.startLine, s.endLine, s.keyLines) } : s; }) };
 	}
 
 	/** A walkthrough coee built itself (an attack trace, say): shown like any other, beside the code. */

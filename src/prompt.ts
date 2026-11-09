@@ -183,7 +183,7 @@ const DIAGRAM_RULES = `Diagrams: add one only when a picture makes the idea clic
 A walkthrough of 4+ scenes usually has 1-3 diagrams, mostly on "Underlying concept", "How it works" and "Big picture" scenes.
 Like a whiteboard sketch: 3-7 nodes, each with a short "label" (a real name from the code, e.g. "rateLimit middleware") and a 2-5 word "detail" ("per-IP counter"). Set "focus" to the id of the node this scene is about. Add a one-line "caption". Set "illustrative": true when it shows a model of the idea rather than code exactly as written.`;
 const DIAGRAM_SCHEMA = `"diagram"?: {"kind": "flow"|"sequence"|"state", "nodes": [{"id": string, "label": string, "detail"?: string}], "edges": [{"from": id, "to": id, "label"?: string, "reply"?: boolean}], "focus"?: id, "caption"?: string, "illustrative"?: boolean}`;
-const SCENE_SCHEMA = (file: boolean) => `{"label": string, "title": string (the takeaway, a short sentence),${file ? ' "file": string,' : ''} "startLine": number, "endLine": number, "text": string (50-110 words; \`code\` spans allowed), ${DIAGRAM_SCHEMA}}`;
+const SCENE_SCHEMA = (file: boolean) => `{"label": string, "title": string (the takeaway, a short sentence),${file ? ' "file": string,' : ''} "startLine": number, "endLine": number (whole functions: from a function's first line to its last), "text": string (50-110 words; \`code\` spans allowed), "keyLines"?: [{"line": number, "note": string}] (the 1-3 lines the text is about, with what each does in under 12 words), ${DIAGRAM_SCHEMA}}`;
 const LEARNING_SCHEMA = `"learn": [string], "terms": [{"name": string, "meaning": string}]`;
 
 function surroundings(ctx: CodeContext, room: number): string {
@@ -686,7 +686,8 @@ export function repair(draft: any, first: number, last: number, files?: Record<s
 		if (Number.isNaN(a)) a = b;
 		if (Number.isNaN(b)) b = a;
 		const file = files ? resolvePath(str(s?.file, 300), known) : undefined;
-		return { title: str(s?.title, 200), label: str(s?.label, 30), text: str(s?.text ?? s?.explanation), file, startLine: a, endLine: b, diagram: repairDiagram(s?.diagram ?? s?.mermaid), snippets: repairSnippets(s?.snippets, known) };
+		const keyLines = (Array.isArray(s?.keyLines) ? s.keyLines : []).map((k: any) => ({ line: int(k?.line), note: str(k?.note, 120) })).filter((k: { line: number; note: string }) => k.line > 0 && k.note).slice(0, 4);
+		return { title: str(s?.title, 200), label: str(s?.label, 30), text: str(s?.text ?? s?.explanation), file, startLine: a, endLine: b, diagram: repairDiagram(s?.diagram ?? s?.mermaid), snippets: repairSnippets(s?.snippets, known), keyLines };
 	}).filter(s => s.title && s.text && !Number.isNaN(s.startLine) && (!files || s.file));
 	// Models often renumber a slice from 1; shift back when that's clearly what happened.
 	const shift = first - 1;
@@ -702,6 +703,8 @@ export function repair(draft: any, first: number, last: number, files?: Record<s
 		if (s.file) scene.file = s.file;
 		if (s.diagram) scene.diagram = s.diagram;
 		if (s.snippets.length) scene.snippets = s.snippets;
+		const keys = s.keyLines.filter((k: { line: number }) => k.line >= scene.startLine && k.line <= scene.endLine);
+		if (keys.length) scene.keyLines = keys;
 		return scene;
 	});
 	if (!out.length) {

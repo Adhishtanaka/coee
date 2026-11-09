@@ -98,8 +98,24 @@ test('key lines must sit inside their step; beginner and experienced prompts dif
 
 test('model-placed steps snap to the whole function they point into, without blank edges', async () => {
 	const { snapRange } = await import('../steps');
-	assert.deepEqual(snapRange('h.js', FILE, 8, 9), { startLine: 7, endLine: 10 });   // part of handle → all of handle
-	assert.deepEqual(snapRange('h.js', FILE, 6, 10), { startLine: 7, endLine: 10 });  // a blank first line is trimmed
-	assert.deepEqual(snapRange('h.js', FILE, 3, 10), { startLine: 3, endLine: 10 });  // two functions: kept as given
-	assert.deepEqual(snapRange('h.js', FILE, 12, 12), { startLine: 12, endLine: 12 });
+	const lines = (r: { startLine: number; endLine: number }) => ({ startLine: r.startLine, endLine: r.endLine });
+	assert.deepEqual(lines(snapRange('h.js', FILE, 8, 9)), { startLine: 7, endLine: 10 });   // part of handle → all of handle
+	assert.deepEqual(lines(snapRange('h.js', FILE, 6, 10)), { startLine: 7, endLine: 10 });  // a blank first line is trimmed
+	assert.deepEqual(lines(snapRange('h.js', FILE, 3, 10)), { startLine: 3, endLine: 10 });  // two functions: kept as given
+	assert.deepEqual(lines(snapRange('h.js', FILE, 12, 12)), { startLine: 12, endLine: 12 });
+});
+
+test('the screenshot case: a tour step from the middle of one function to the middle of the next', async () => {
+	const fs = await import('fs'), path = await import('path');
+	const { snapRange } = await import('../steps');
+	const text = fs.readFileSync(path.join(__dirname, '../../test/fixtures/api-ts/src/services/orders.ts'), 'utf8');
+	// The model said 16-26: from createOrder's limit check to cancelOrder's paid check. Both functions are shown whole...
+	const r = snapRange('src/services/orders.ts', text, 16, 26);
+	assert.deepEqual([r.startLine, r.endLine], [14, 29]);
+	// ...and the four checks the step is about are the key lines.
+	assert.deepEqual(r.keyLines!.map(k => k.line), [16, 24, 25, 26]);
+	assert.match(r.keyLines![0].note, /order total over the limit/);
+	assert.match(r.keyLines![3].note, /a paid order cannot be cancelled/, 'the message, not the first string on the line');
+	// Key lines the model gave win, if they're inside the range.
+	assert.deepEqual(snapRange('src/services/orders.ts', text, 16, 26, [{ line: 25, note: 'only the owner' }, { line: 3, note: 'outside' }]).keyLines, [{ line: 25, note: 'only the owner' }]);
 });
