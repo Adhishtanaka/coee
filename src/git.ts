@@ -163,6 +163,11 @@ export async function collect(t: ReviewTarget, allowEmpty = false): Promise<Revi
 	return { files, skipped: Math.max(0, all.length - files.length), plus, minus, key: `${t.base}..${head}:${raw.length}:${hash(raw)}` };
 }
 
+/** The branch checked out ("HEAD" when detached). */
+export async function currentBranch(repo: string): Promise<string> {
+	return (await git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
+}
+
 /** Every file git knows here (tracked, plus new files not ignored), relative to `dir`. Fast, and respects .gitignore. */
 export async function lsFiles(dir: string): Promise<string[]> {
 	return (await git(dir, 'ls-files', '-co', '--exclude-standard', '-z')).split('\0').filter(Boolean);

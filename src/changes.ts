@@ -1,9 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { FileDiff, FileReview, ReviewFinding, SEVERITIES, addedLines, buildChangeReviewPrompt, buildCommitMessagePrompt, relocate, repairChangeReview } from './prompt';
+import { FileDiff, FileReview, ReviewFinding, SEVERITIES, addedLines, buildChangeOverviewPrompt, buildChangeReviewPrompt, buildCommitMessagePrompt, relocate, repairChangeOverview, repairChangeReview } from './prompt';
 import { scanText } from './rules';
+import { ProjectIndex, indexProject } from './codeindex';
+import { callSites, changedSymbols } from './facts';
+import { sourceFiles } from './map';
+import { readFiles } from './walkthrough';
 import { Lm, isCancel, log } from './lm';
-import { ReviewTarget, branchVsBase, collect, commit, hash, pickCommit, repoRoot, stagedOnly, useCommitMessage, working, openDiff } from './git';
+import { ReviewTarget, branchVsBase, collect, commit, currentBranch, hash, pickCommit, repoRoot, stagedOnly, useCommitMessage, working, openDiff } from './git';
 import { pickProject } from './map';
 import { createPanel, page, showLines } from './ui';
 import { addCode } from './apply';
@@ -36,6 +40,9 @@ export class ChangesController implements vscode.Disposable, vscode.CodeActionPr
 	private mode: Mode = 'working';
 	private target?: ReviewTarget;
 	private files = new Map<string, FileState>();
+	/** The second pass, across the whole change, once every file has its own review. */
+	private overall?: FileReview & { key: string };
+	private overallBusy = false;
 	private rules = new Map<string, ReviewFinding[]>();
 	private error?: string;
 	private loading = false;
@@ -175,12 +182,17 @@ export class ChangesController implements vscode.Disposable, vscode.CodeActionPr
 	private async drain() {
 		if (this.running) return;
 		this.running = true;
+		let project: { idx: ProjectIndex; texts: Map<string, string> } | undefined;
 		try {
 			for (let f = this.due()[0]; f; f = this.due()[0]) {
 				f.status = 'reviewing';
 				this.publish();
+				// What the change can break: where the rest of the project calls the functions this file changed.
+				project ??= await this.project();
+				const sites = callSites(project.idx, project.texts, changedSymbols(indexProject([{ path: f.path, text: f.text! }]), f.path, addedLines(f.diff)), f.path);
 				const others = [...this.files.keys()].filter(p => p !== f.path);
-				const context = others.length ? `Other files in this change: ${others.slice(0, 20).join(', ')}` : '';
+				const context = [others.length ? `Other files in this change: ${others.slice(0, 20).join(', ')}` : '',
+					sites.length ? `Where the rest of the project calls the functions this change touches (check they still work):\n${sites.map(c => `- ${c.file}:${c.line}${c.in ? ` in ${c.in}()` : ''}: ${c.text}`).join('\n')}` : ''].filter(Boolean).join('\n\n');
 				try {
 					const review = await this.lm.json<FileReview>(b => buildChangeReviewPrompt(f.diff, f.text!, context, b), d => repairChangeReview(d, f.diff, f.text!));
 					if (this.files.get(f.path) !== f) continue; // the file changed meanwhile; its new state is in the queue
@@ -200,8 +212,45 @@ export class ChangesController implements vscode.Disposable, vscode.CodeActionPr
 					this.publish();
 				}
 			}
+			await this.reviewWhole(project);
 		} finally {
 			this.running = false;
+		}
+	}
+
+	/** The project's code, for call sites. Read once per round of reviews; ponytail: capped like the other features. */
+	private async project(): Promise<{ idx: ProjectIndex; texts: Map<string, string> }> {
+		const root = vscode.Uri.file(this.repo!);
+		const { files } = await readFiles(root, await sourceFiles(root), 600_000);
+		return { idx: indexProject(files), texts: new Map(files.map(f => [f.path, f.text])) };
+	}
+
+	/** Once every changed file has its review: one more pass across the whole change, cached by the change itself. */
+	private async reviewWhole(project?: { idx: ProjectIndex; texts: Map<string, string> }) {
+		const files = [...this.files.values()].filter(f => f.status !== 'skipped');
+		if (files.length < 2 || files.some(f => f.status !== 'reviewed')) return;
+		const key = `${VERSION}:${hash(files.map(f => f.key).sort().join('|'))}`;
+		if (this.overall?.key === key) return;
+		const saved = this.ext.workspaceState.get<Record<string, FileReview>>(REVIEWS_KEY, {});
+		if (saved[key]) { this.overall = { ...saved[key], key }; return this.publish(); }
+		this.overallBusy = true;
+		this.publish();
+		try {
+			project ??= await this.project();
+			const names = files.flatMap(f => changedSymbols(indexProject([{ path: f.path, text: f.text! }]), f.path, addedLines(f.diff)));
+			const changed = new Set(files.map(f => f.path));
+			const sites = callSites(project.idx, project.texts, [...new Set(names)]).filter(c => !changed.has(c.file));
+			const reviews = Object.fromEntries(files.map(f => [f.path, { summary: f.review?.summary ?? '', risk: f.review?.risk ?? 'low', titles: (f.review?.findings ?? []).map(x => x.title) }]));
+			const intent = this.repo ? await currentBranch(this.repo).catch(() => '') : '';
+			const review = await this.lm.json<FileReview>(b => buildChangeOverviewPrompt(files.map(f => f.diff), reviews, sites, intent && !/^(main|master|HEAD)$/.test(intent) ? `branch ${intent}` : '', b),
+				d => repairChangeOverview(d, files.map(f => ({ diff: f.diff, text: f.text }))));
+			this.overall = { ...review, key };
+			await this.ext.workspaceState.update(REVIEWS_KEY, Object.fromEntries(Object.entries({ ...saved, [key]: review }).slice(-MAX_SAVED)));
+		} catch (err) {
+			if (!isCancel(err)) log.warn(`whole-change review failed: ${err}`);
+		} finally {
+			this.overallBusy = false;
+			this.publish();
 		}
 	}
 
@@ -213,7 +262,7 @@ export class ChangesController implements vscode.Disposable, vscode.CodeActionPr
 			// A rule hit the model also reported (same line, security) shows once, as the model's richer comment.
 			const rules = (this.rules.get(f.path) ?? []).filter(r => !model.some(m => m.kind === 'security' && m.startLine <= r.startLine && r.startLine <= m.endLine));
 			return [...model, ...rules];
-		});
+		}).concat(this.overall && [...this.files.values()].every(f => f.status === 'reviewed' || f.status === 'skipped') ? this.overall.findings : []);
 		return all.filter(f => !gone.has(fingerprint(f))).sort((p, q) => SEVERITIES.indexOf(p.severity) - SEVERITIES.indexOf(q.severity) || p.file.localeCompare(q.file) || p.startLine - q.startLine);
 	}
 
@@ -262,6 +311,7 @@ export class ChangesController implements vscode.Disposable, vscode.CodeActionPr
 			files: [...this.files.values()].map(f => ({ path: f.path, status: f.status, diffStatus: f.diff.status, plus: f.plus, minus: f.minus, staged: f.staged, summary: f.review?.summary, risk: f.review?.risk, error: f.error,
 				count: list.filter(x => x.file === f.path).length })),
 			findings: list, commitMessage: this.commitMessage, messageBusy: this.messageBusy, focus: this.focus,
+			overall: this.overall && { summary: this.overall.summary, risk: this.overall.risk }, overallBusy: this.overallBusy,
 			live: this.mode === 'working' || this.mode === 'staged',
 		} });
 	}
@@ -433,6 +483,9 @@ article { max-width: 920px; margin: 0 auto; display: grid; gap: 18px; align-cont
 .sev { text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: var(--c); }
 .finding pre { margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; overflow: auto; max-height: 240px; font-family: var(--mono); font-size: .9em; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.lede { line-height: 1.6; }
+.across { display: grid; gap: 10px; }
+.across h3 { font-size: 1.05em; }
 .empty { padding: 24px; border: 1px dashed var(--line); border-radius: 8px; line-height: 1.6; }
 .sweep { width: 80px; }
 `;
@@ -458,6 +511,8 @@ function verdict() {
   const auto = { onSave: 'Each file is reviewed when you save it.', onStage: 'Files are reviewed when you stage them; fast checks run on every save.', off: 'Automatic review is off; fast checks still run on every save.' }[st.auto];
   return el('section', { className: 'verdict ' + cls },
     el('h2', {}, title),
+    st.overall && st.overall.summary ? el('p', { className: 'lede' }, st.overall.summary) : null,
+    st.overallBusy ? el('p', { className: 'note' }, 'Reading the whole change across files…') : null,
     fs.length ? el('div', { className: 'chips' }, ...['critical', 'high', 'medium', 'low'].filter(count).map(s => el('span', { className: 'chip ' + s }, el('span', { className: 'dot' }), count(s) + ' ' + s))) : null,
     failed ? el('p', { className: 'error' }, 'The review of ' + failed.path + ' failed: ' + failed.error) : null,
     el('div', { className: 'row' },
@@ -510,7 +565,11 @@ function render() {
     : !files.length ? [st.loading ? el('div', { className: 'sweep', 'aria-hidden': 'true' }) : el('div', { className: 'empty' }, st.mode === 'working'
       ? 'No uncommitted changes. coee watches this repository: edit and save a file, and the review appears here, on the lines in the editor, and in the Problems panel.'
       : 'Nothing to show for this comparison.')]
-    : [verdict(), el('div', { className: 'files' }, ...files.map(file)),
+    : [verdict(),
+      (st.findings || []).some(f => f.id.startsWith('overall#')) ? el('section', { className: 'across' }, el('h3', {}, 'Across the change'),
+        el('p', { className: 'note' }, 'What only shows when the files are read together: callers not updated, contracts changed on one side, missing tests.'),
+        ...(st.findings || []).filter(f => f.id.startsWith('overall#')).map(f => el('div', {}, el('div', { className: 'note mono' }, f.file), finding(f)))) : null,
+      el('div', { className: 'files' }, ...files.map(file)),
       !st.live ? el('p', { className: 'note' }, 'Comments on the lines and the Problems panel are shown for uncommitted and staged changes, where the files match the editor.') : null];
   root.replaceChildren(bar, el('div', { className: 'wrap' }, el('article', {}, ...body)));
   if (st.focus && st.focus !== focused) { focused = st.focus; const n = document.getElementById('x-' + focused); if (n) { n.classList.add('focus'); n.scrollIntoView({ block: 'center' }); } }

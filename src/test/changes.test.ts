@@ -81,3 +81,38 @@ test('compressDiff: pr-agent style; main language first, deletions named, nothin
 	assert.ok(tight.minimized.includes('src/b.ts') && tight.minimized.includes('README.md'));
 	assert.ok(tight.text.length <= 500);
 });
+
+test('review context: what a change touched, and where the rest of the project calls it', async () => {
+	const fs = await import('fs'), path = await import('path');
+	const { indexProject } = await import('../codeindex');
+	const { callSites, changedSymbols } = await import('../facts');
+	const dir = path.join(__dirname, '../../test/fixtures/api-ts');
+	const files = ['src/services/orders.ts', 'src/routes/orders.ts', 'src/types.ts'].map(p => ({ path: p, text: fs.readFileSync(path.join(dir, p), 'utf8') }));
+	const idx = indexProject(files);
+	assert.deepEqual(changedSymbols(idx, 'src/services/orders.ts', [27]), ['cancelOrder']);
+	const sites = callSites(idx, new Map(files.map(f => [f.path, f.text])), ['cancelOrder'], 'src/services/orders.ts');
+	assert.deepEqual(sites.map(s => [s.file, s.line]), [['src/routes/orders.ts', 14]]);
+});
+
+test('reviews keep only what the model would defend: low confidence is dropped', () => {
+	const draft = { summary: 's', findings: [
+		{ severity: 'high', kind: 'bug', title: 'Sure', why: 'Breaks.', confidence: 9, symbol: AFTER[2], startLine: 3 },
+		{ severity: 'medium', kind: 'bug', title: 'Maybe', why: 'Might.', confidence: 4, symbol: AFTER[2], startLine: 3 },
+		{ severity: 'low', kind: 'test', title: 'Unscored', why: 'No score given.', symbol: AFTER[2], startLine: 3 },
+	] };
+	assert.deepEqual(repairChangeReview(draft, file, text).value!.findings.map(f => f.title), ['Sure', 'Unscored']);
+});
+
+test('whole-change review: findings are checked against their own file', async () => {
+	const { repairChangeOverview, buildChangeOverviewPrompt } = await import('../prompt');
+	const draft = { summary: 'Loops by index across the cart.', risk: 'medium', findings: [
+		{ severity: 'high', kind: 'bug', title: 'Caller not updated', why: 'checkout() still expects a promise.', confidence: 8, file: 'cart.js', symbol: AFTER[2], startLine: 3 },
+		{ severity: 'high', kind: 'bug', title: 'Unknown file', why: 'x', confidence: 9, file: 'nope.js', startLine: 1 },
+	] };
+	const r = repairChangeOverview(draft, [{ diff: file, text }]).value!;
+	assert.deepEqual(r.findings.map(f => [f.id, f.file, f.startLine]), [['overall#1', 'cart.js', 3]]);
+	const p = buildChangeOverviewPrompt([file], { 'cart.js': { summary: 'Loops by index.', risk: 'high', titles: ['Off by one'] } }, [{ file: 'checkout.js', line: 9, text: 'await total(items)', in: 'checkout', calls: 'total' }], 'branch fix-cart');
+	assert.match(p, /checkout\.js:9 in checkout\(\) calls total/);
+	assert.match(p, /branch fix-cart/);
+	assert.match(p, /cart\.js \(risk high\): Loops by index\. Found: Off by one/);
+});

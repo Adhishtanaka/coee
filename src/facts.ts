@@ -93,3 +93,28 @@ export function flowFacts(idx: ProjectIndex, facts: Facts, refs: ReadonlyArray<{
 	const dtos = facts.dtos.filter(d => d.kind !== 'object' && new RegExp(`\\b${d.name}\\b`).test(body)).map(d => d.name);
 	return { rules, dtos: [...new Set(dtos)] };
 }
+
+/** Functions a change touched: those whose lines include an added line. */
+export function changedSymbols(idx: ProjectIndex, file: string, added: readonly number[]): string[] {
+	const fi = idx.files.get(file);
+	if (!fi) return [];
+	return [...new Set(fi.symbols.filter(s => s.kind !== 'class' && added.some(l => l >= s.line && l <= s.end)).map(s => s.name))];
+}
+
+/** Where the rest of the project calls these functions: the line, and the function it sits in. What a change can break. */
+export function callSites(idx: ProjectIndex, texts: ReadonlyMap<string, string>, names: readonly string[], skipFile?: string, max = 15): Array<{ file: string; line: number; text: string; in?: string; calls: string }> {
+	const out: Array<{ file: string; line: number; text: string; in?: string; calls: string }> = [];
+	for (const name of names) {
+		const re = new RegExp(`(^|[^\\w$.])${name.replace(/[$]/g, '\\$')}\\s*\\(|\\.${name.replace(/[$]/g, '\\$')}\\s*\\(`);
+		for (const [file, text] of texts) {
+			if (file === skipFile) continue;
+			const fi = idx.files.get(file);
+			text.split('\n').forEach((l, i) => {
+				if (out.length >= max || !re.test(l) || /^\s*(function|def|func|export\s+function)\b/.test(l)) return;
+				const at = fi?.symbols.find(s => s.kind !== 'class' && s.line <= i + 1 && i + 1 <= s.end);
+				out.push({ file, line: i + 1, text: l.trim().slice(0, 160), in: at?.name, calls: name });
+			});
+		}
+	}
+	return out;
+}

@@ -1458,9 +1458,10 @@ Rules:
 - Each finding: "severity" (critical, high, medium, low), "kind" (${KINDS.join(', ')}), "title" (short), "why" (what goes wrong, when, and the consequence, in 1-3 plain sentences), "symbol" (the exact text of the line it starts at, copied from the file), "startLine"/"endLine" (new-file line numbers as shown).
 - "suggestion" when a concrete fix is small: "find" is the existing lines to replace, copied EXACTLY from the file without line numbers, and "code" what replaces them. Complete code, in the file's style.
 - "risk": low (safe to commit), medium (worth a second look), high (likely to break something).
+- "confidence" (1-10): how sure you are this is a real problem in this code, after checking it against the whole file and the callers shown. Only report what you'd defend to the author; below 6 is left out.
 
 Reply with ONLY JSON:
-{"summary": string (one sentence: what this change does), "risk": "low"|"medium"|"high", "findings": [{"severity": string, "kind": string, "title": string, "why": string, "symbol": string, "startLine": number, "endLine": number, "suggestion"?: {"find": string, "code": string}}]}
+{"summary": string (one sentence: what this change does), "risk": "low"|"medium"|"high", "findings": [{"severity": string, "kind": string, "title": string, "why": string, "confidence": number, "symbol": string, "startLine": number, "endLine": number, "suggestion"?: {"find": string, "code": string}}]}
 
 The change (new-file line numbers; + added, - removed):
 `;
@@ -1486,6 +1487,8 @@ export function repairChangeReview(draft: any, file: FileDiff, text: string): { 
 	for (const x of draft.findings) {
 		const title = str(x?.title, 120), why = str(x?.why, 700);
 		if (!title || !why) continue;
+		const confidence = int(x?.confidence);
+		if (confidence > 0 && confidence < 6) continue; // the model's own doubt: noise in a review (pr-agent's self-reflection)
 		const [ref] = snapRefs([{ path: file.path, symbol: str(x?.symbol, 160).split('\n')[0].trim() || undefined, startLine: int(x?.startLine) > 0 ? int(x?.startLine) : undefined, endLine: int(x?.endLine) > 0 ? int(x?.endLine) : undefined }], f);
 		const a = ref.startLine ?? 0, b = Math.max(a, ref.endLine ?? a);
 		if (!a || ![...Array(b - a + 1)].some((_, k) => region.has(a + k))) continue; // not about this change
@@ -1546,4 +1549,49 @@ export function repairRules(draft: any, ids: readonly string[]): { value?: Recor
 	const out: Record<string, string> = {};
 	for (const r of raw) { const id = str(r?.id, 300), plain = str(r?.plain, 200); if (ids.includes(id) && plain) out[id] = plain; }
 	return Object.keys(out).length || !ids.length ? { value: out, errors: [] } : { errors: ['"rules" must give "plain" words for the rule ids listed'] };
+}
+
+/**
+ * The second pass over a whole change, after each file was reviewed on its own: what only shows across files.
+ * Broken callers, API or data-shape changes, missing tests, files that changed inconsistently, and whether the change
+ * does what its branch says.
+ */
+export function buildChangeOverviewPrompt(files: readonly FileDiff[], reviews: Record<string, { summary: string; risk: string; titles: string[] }>, callers: ReadonlyArray<{ file: string; line: number; text: string; in?: string; calls: string }>, intent: string, budget = 1e9): string {
+	const head = `You are a senior engineer doing the final read of a colleague's whole change before it is committed. Each file was already reviewed on its own; don't repeat those findings. Look only for what shows ACROSS files:
+- a function, route, data shape (DTO) or config whose signature or meaning changed while its callers or users (listed below) weren't updated
+- behaviour that changed without a matching test change, when the project has tests
+- files that changed inconsistently (one side of a contract updated, the other not)
+- removed validation, auth or error handling that something else relied on
+- whether the change does what ${intent ? `its branch or message says: "${intent}"` : 'it appears meant to'}, and what it leaves undone
+${GUIDE}
+Each finding: "severity", "kind" (${KINDS.join(', ')}), "title", "why" (what breaks, where, and when), "confidence" (1-10; below 6 is left out), "file" (one of the changed files), "symbol" (the exact text of the line it's about, copied from the diff), "startLine"/"endLine" (new-file numbers).
+If nothing is wrong across files, return an empty list: that is a good result.
+
+Reply with ONLY JSON:
+{"summary": string (two or three sentences: what the whole change does, for a reviewer), "risk": "low"|"medium"|"high", "findings": [{"severity": string, "kind": string, "title": string, "why": string, "confidence": number, "file": string, "symbol": string, "startLine": number, "endLine": number}]}
+
+Each file's own review:
+${Object.entries(reviews).map(([f, r]) => `- ${f} (risk ${r.risk}): ${r.summary}${r.titles.length ? ` Found: ${r.titles.join('; ')}` : ''}`).join('\n') || '(none)'}
+
+Where the rest of the project calls what changed:
+${callers.map(c => `- ${c.file}:${c.line}${c.in ? ` in ${c.in}()` : ''} calls ${c.calls}: ${c.text}`).join('\n') || '(no callers outside the changed files)'}
+
+The change:
+`;
+	return head + compressDiff(files, budget - head.length - 200).text;
+}
+
+/** Cross-file findings, each checked against its own file like a per-file review. */
+export function repairChangeOverview(draft: any, files: ReadonlyArray<{ diff: FileDiff; text?: string }>): { value?: FileReview; errors: string[] } {
+	if (!draft || typeof draft !== 'object' || !Array.isArray(draft.findings)) return { errors: ['Reply must be a JSON object with "findings" (empty if nothing is wrong across files)'] };
+	const known = files.map(f => f.diff.path);
+	const out: ReviewFinding[] = [];
+	for (const x of draft.findings) {
+		const path = resolvePath(str(x?.file, 300), known), f = files.find(y => y.diff.path === path);
+		if (!f?.text) continue;
+		const one = repairChangeReview({ findings: [x] }, f.diff, f.text).value?.findings[0];
+		if (one) out.push({ ...one, id: `overall#${out.length + 1}` });
+	}
+	const risk = draft.risk === 'high' || draft.risk === 'medium' ? draft.risk : 'low';
+	return { value: { summary: str(draft.summary, 600), risk, findings: out.slice(0, 10) }, errors: [] };
 }

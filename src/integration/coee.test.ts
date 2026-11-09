@@ -59,6 +59,7 @@ const model = new FakeModel()
 			fixCode: "exports.read = name => { if (name.includes('..')) throw new Error('bad name'); return fs.readFileSync('./uploads/' + name); };",
 			testCode: "const test = require('node:test');\nconst assert = require('node:assert');\nconst { read } = require('./files');\ntest('read refuses names that leave uploads', () => {\n  assert.throws(() => read('../package.json'));\n});" }] : [] };
 	})
+	.on(/final read of a colleague's whole change/, { summary: 'Adds a cache to the server.', risk: 'low', findings: [] })
 	.on(/reviewing a colleague's change/, p => {
 		const line = Number(/(\d+) \+ .*cache/.exec(p)?.[1] ?? 1);
 		return { summary: 'Adds a cache.', risk: 'medium', findings: [{ severity: 'medium', kind: 'bug', title: 'Cache never expires', why: 'Entries stay forever, so memory grows with every request.', startLine: line, endLine: line,
@@ -201,6 +202,23 @@ suite('coee in VS Code', () => {
 		await doc.save();
 		await sleep(3000);
 		assert.equal(model.count(/reviewing a colleague's change/), n);
+		await vscode.workspace.getConfiguration('coee').update('changes.autoReview', undefined, vscode.ConfigurationTarget.Workspace);
+	});
+
+	test('changes: once every changed file is reviewed, one more pass reads the change as a whole', async () => {
+		await vscode.workspace.getConfiguration('coee').update('changes.autoReview', 'onSave', vscode.ConfigurationTarget.Workspace);
+		const before = model.count(/final read of a colleague's whole change/);
+		for (const [p, at, line] of [['store.js', 0, 'const cache = new Map();\n'], ['server.js', 0, '// cache entries live for a minute\n']] as const) {
+			const doc = await vscode.workspace.openTextDocument(file(p));
+			const edit = new vscode.WorkspaceEdit();
+			edit.insert(doc.uri, new vscode.Position(at, 0), line);
+			await vscode.workspace.applyEdit(edit);
+			await doc.save();
+		}
+		await until('the whole-change review', () => model.count(/final read of a colleague's whole change/) > before, 30_000);
+		const p = model.asked.filter(x => /final read of a colleague's whole change/.test(x)).pop()!;
+		assert.match(p, /store\.js \(risk/);
+		assert.match(p, /server\.js \(risk/);
 		await vscode.workspace.getConfiguration('coee').update('changes.autoReview', undefined, vscode.ConfigurationTarget.Workspace);
 	});
 });
