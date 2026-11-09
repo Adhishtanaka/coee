@@ -9,8 +9,8 @@ import { Lm, Prompt, isCancel, log } from './lm';
 import { diagramSvg } from './layout';
 import { MANIFEST, MapController, pickProject, read, sourceFiles } from './map';
 import { sampleTree } from './subsystems';
-import { SymbolSpan, planSteps } from './steps';
-import { indexFile, indexProject } from './codeindex';
+import { SymbolSpan, planSteps, snapRange } from './steps';
+import { indexProject } from './codeindex';
 import { codeColumn, createPanel, page } from './ui';
 import { addCode, fileText } from './apply';
 import { Review, ReviewFile, ReviewTarget, collect, openDiff, pickReview, repoRoot, useCommitMessage } from './git';
@@ -136,9 +136,17 @@ export class WalkthroughController implements vscode.Disposable {
 		overviewRulerLane: vscode.OverviewRulerLane.Center,
 	});
 
+	/** The step's key lines, stronger than the rest of the step, with what each does at the end of the line. */
+	private readonly keyHighlight = vscode.window.createTextEditorDecorationType({
+		backgroundColor: new vscode.ThemeColor('coee.highlightBackground'),
+		isWholeLine: true,
+		after: { color: new vscode.ThemeColor('textLink.foreground'), margin: '0 0 0 2em', fontStyle: 'italic' },
+	});
+
 	constructor(private readonly extensionUri: vscode.Uri, private readonly maps: MapController, private readonly store: vscode.Memento) {
 		this.disposables.push(
 			this.highlight,
+			this.keyHighlight,
 			vscode.workspace.onDidChangeTextDocument(e => {
 				// A plan watches its snippets instead: code added (by coee or by hand) shows as added, not as a stale plan.
 				if (this.session?.plan && e.contentChanges.length && this.inSession(e.document.uri)) {
@@ -183,6 +191,12 @@ export class WalkthroughController implements vscode.Disposable {
 		if (walking) return this.panel!.reveal(this.panel!.viewColumn, false);
 		const last = this.store.get<Recent[]>(RECENT_KEY, []).find(r => r.kind !== 'plan' && r.kind !== 'review');
 		return last ? this.reopen(last.id) : this.tour(root);
+	}
+
+	/** Steps the model placed in files snap to whole functions, so the highlight covers the code the text is about. */
+	private snapped(w: Walkthrough, files: FolderFile[]): Walkthrough {
+		const byPath = new Map(files.map(f => [f.path, f.text]));
+		return { ...w, scenes: w.scenes.map(s => { const t = s.file && byPath.get(s.file); return t ? { ...s, ...snapRange(s.file!, t, s.startLine, s.endLine) } : s; }) };
 	}
 
 	/** A walkthrough coee built itself (an attack trace, say): shown like any other, beside the code. */
@@ -314,7 +328,8 @@ export class WalkthroughController implements vscode.Disposable {
 		const { first, last } = span(doc, range, MAX_LINES);
 		const flat = flatten(symbols);
 		const cuts = flat.length ? flat.map(s => s.range.start.line) : blankLines(doc, first, last);
-		const spans = packChapters(first, last, cuts, CHAPTER_LINES);
+		const tops = symbols.filter(x => x.range.end.line > x.range.start.line).map(x => [x.range.start.line, x.range.end.line] as [number, number]);
+		const spans = packChapters(first, last, cuts, CHAPTER_LINES, tops);
 		const n = spans.length;
 		const wholeFile = first === 0 && last >= doc.lineCount - 1;
 		const testFile = isTestFile(vscode.workspace.asRelativePath(doc.uri), doc.getText());
@@ -327,18 +342,18 @@ export class WalkthroughController implements vscode.Disposable {
 			: k === vscode.SymbolKind.Method || k === vscode.SymbolKind.Constructor ? 'method'
 			: [vscode.SymbolKind.Class, vscode.SymbolKind.Interface, vscode.SymbolKind.Struct, vscode.SymbolKind.Enum].includes(k) ? 'class' : undefined;
 		const fileText = doc.getText(), rel = vscode.workspace.asRelativePath(doc.uri);
-		const fromEditor = flat.flatMap(x => { const kind = kindOf(x.kind); return kind ? [{ name: x.name, kind, line: x.range.start.line + 1, end: x.range.end.line + 1 }] : []; });
-		const fromIndex = indexFile(rel, fileText).symbols;
-		const symbolsAll: SymbolSpan[] = [...fromIndex, ...fromEditor.filter(e => !fromIndex.some(i => i.line === e.line))];
+		// The language server's ranges are exact (planSteps prefers them); its pseudo-symbols like "createServer() callback" are dropped there.
+		const symbolsAll: SymbolSpan[] = flat.flatMap(x => { const kind = kindOf(x.kind); return kind ? [{ name: x.name, kind, line: x.range.start.line + 1, end: x.range.end.line + 1 }] : []; });
 		const jobs: Job[] = parts.map((base, k) => {
 			const steps = testFile ? [] : planSteps(rel, fileText, base.startLine, endLine(base), { firstPart: k === 0, lastPart: k === n - 1, symbols: symbolsAll });
 			return {
 				where: { startLine: base.startLine, endLine: endLine(base), what: `lines ${base.startLine}–${endLine(base)}` },
-				run: earlier => this.cached({ explain: base, earlier, v: steps.length ? 'steps1' : undefined, steps }, () => {
+				run: earlier => this.cached({ explain: base, earlier, v: steps.length ? 'steps2' : undefined, steps, audience: vscode.workspace.getConfiguration('coee').get('audience', 'beginner') }, () => {
 					const ctx: CodeContext = base.part ? { ...base, part: { ...base.part, earlier } } : base;
 					// No functions in these lines (a config, a script body): the model picks the scenes as before.
 					if (!steps.length) return this.reader.json<Walkthrough>(b => buildExplainPrompt(ctx, b), d => repair(d, ctx.startLine, endLine(ctx)));
-					return this.reader.json<Walkthrough>(b => buildStepsPrompt(ctx, steps, b), d => repairSteps(d, steps));
+					const audience = vscode.workspace.getConfiguration('coee').get<string>('audience', 'beginner') === 'experienced' ? 'experienced' : 'beginner';
+					return this.reader.json<Walkthrough>(b => buildStepsPrompt(ctx, steps, b, audience), d => repairSteps(d, steps));
 				}),
 			};
 		});
@@ -479,15 +494,15 @@ export class WalkthroughController implements vscode.Disposable {
 		const jobs: Job[] = [
 			...(one ? [] : [
 			{ where: { ...first(overviewPaths), what: 'the overview' }, run: async () => withMapDiagram(await this.cached({ tour: root!.toString(), map, overview: true, code: digest(pick(overviewPaths)) }, () =>
-				this.reader.json<Walkthrough>(b => buildTourOverviewPrompt(map, files, b, overviewPaths), d => repair(d, 1, 1, lines))), map) },
+				this.reader.json<Walkthrough>(b => buildTourOverviewPrompt(map, files, b, overviewPaths), d => repair(d, 1, 1, lines)).then(w => this.snapped(w, files))), map) },
 			// Use cases see the entry points first, then each part's own files; the budget decides how much fits.
 			{ where: { ...first(overviewPaths), what: 'the use cases' }, run: (earlier: string[]) => this.cached({ tour: root!.toString(), map, useCases: true, earlier, code: digest(pick(wanted)) }, () =>
-				this.reader.json<Walkthrough>(b => buildTourUseCasesPrompt(map, files, b, overviewPaths), d => repair(d, 1, 1, lines))) },
+				this.reader.json<Walkthrough>(b => buildTourUseCasesPrompt(map, files, b, overviewPaths), d => repair(d, 1, 1, lines)).then(w => this.snapped(w, files))) },
 			]),
 			...components.map(c => ({
 				where: { ...first(c.files.map(f => f.path)), what: c.name },
 				run: (earlier: string[]) => this.cached({ tour: root!.toString(), map, c: c.id, earlier, code: digest(pick(c.files.map(f => f.path))) }, () =>
-					this.reader.json<Walkthrough>(b => buildTourPartPrompt(map, c, files, earlier, b), d => repair(d, 1, 1, lines))),
+					this.reader.json<Walkthrough>(b => buildTourPartPrompt(map, c, files, earlier, b), d => repair(d, 1, 1, lines)).then(w => this.snapped(w, files))),
 			})),
 		];
 		this.session = { uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, wanted), jobs, switchable: true };
@@ -604,7 +619,7 @@ export class WalkthroughController implements vscode.Disposable {
 		this.session = {
 			uri: root, range: new vscode.Range(0, 0, 0, 0), parts: [], summaries: [], files: uriMap(root, picked.files), plan: question, switchable: true,
 			jobs: [{ where: { file: files[0].path, startLine: 1, endLine: 1, what: 'the plan' }, run: () => this.cached({ plan: question, v: 2, root: root!.toString(), map, approach: picked.approach, code: digest(files) }, () => // v: bump when what a saved plan holds changes (2: code and tests)
-				this.reader.json<Walkthrough>(b => buildPlanPrompt(map, question, picked.approach, files, b, picked.files), d => repairPlan(d, lines, files))) }],
+				this.reader.json<Walkthrough>(b => buildPlanPrompt(map, question, picked.approach, files, b, picked.files), d => repairPlan(d, lines, files)).then(w => this.snapped(w, files))) }],
 		};
 		await this.runJobs(gen, question, `Change plan · ${name} · ${files.length} files`);
 		void this.refreshSnippets();
@@ -874,13 +889,15 @@ export class WalkthroughController implements vscode.Disposable {
 		if (at && at !== this.stepAt) this.onStep?.(s!.file!, s!.startLine);
 		this.stepAt = at;
 		const uri = this.session && this.sceneUri(s);
-		for (const e of vscode.window.visibleTextEditors) if (e.document.uri.toString() !== uri?.toString()) e.setDecorations(this.highlight, []);
+		for (const e of vscode.window.visibleTextEditors) if (e.document.uri.toString() !== uri?.toString()) { e.setDecorations(this.highlight, []); e.setDecorations(this.keyHighlight, []); }
 		const editor = uri && this.editorFor(uri);
 		if (!editor || !this.session) return;
 		if (status === 'answer') return editor.setDecorations(this.highlight, [this.session.range]);
-		if (status !== 'ready' || !s) return editor.setDecorations(this.highlight, []);
+		if (status !== 'ready' || !s) { editor.setDecorations(this.keyHighlight, []); return editor.setDecorations(this.highlight, []); }
 		const last = editor.document.lineCount - 1;
 		editor.setDecorations(this.highlight, [new vscode.Range(Math.min(s.startLine - 1, last), 0, Math.min(s.endLine - 1, last), 0)]);
+		editor.setDecorations(this.keyHighlight, (s.keyLines ?? []).filter(k => k.line - 1 <= last).map((k, i) => ({
+			range: new vscode.Range(k.line - 1, 0, k.line - 1, 0), renderOptions: { after: { contentText: `  ← ${i + 1}. ${k.note}` } } })));
 	}
 }
 
@@ -1094,6 +1111,12 @@ main:has(.walk) { padding: 0; height: 100vh; }
 .ln .no { width: 4.2em; flex: none; text-align: right; padding-right: 1.6em; color: var(--vscode-editorLineNumber-foreground, var(--muted)); user-select: none; }
 .ln.hl { background: color-mix(in srgb, var(--vscode-textLink-foreground) 16%, transparent); }
 .ln.hl .no { color: var(--vscode-editorLineNumber-activeForeground, var(--vscode-foreground)); }
+.ln.key { background: color-mix(in srgb, var(--vscode-textLink-foreground) 34%, transparent); }
+.knum { display: inline-block; min-width: 1.4em; text-align: center; border-radius: 999px; background: var(--vscode-textLink-foreground); color: var(--vscode-editor-background); font-weight: 700; font-size: .85em; }
+.looks { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.looks .link { margin-right: 6px; }
+.ln.pulse { outline: 2px solid var(--vscode-focusBorder); }
+.knote { margin-left: 2.5em; color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); font-style: italic; white-space: nowrap; }
 .ln.add .no { box-shadow: inset -3px 0 0 var(--vscode-gitDecoration-addedResourceForeground, #3fb950); color: var(--vscode-gitDecoration-addedResourceForeground, #3fb950); }
 .ln.add:not(.hl) { background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #3fb950) 10%, transparent); }
 .ln.del { background: color-mix(in srgb, var(--vscode-gitDecoration-deletedResourceForeground, #f85149) 13%, transparent); }
@@ -1323,7 +1346,13 @@ function facts(s) {
       ? el('button', { className: 'lchip', title: 'Go to the step for ' + n, onclick: () => send('go', { i: k }) }, n)
       : el('span', { className: 'lchip off', title: 'Not in this walkthrough' }, n); }))) : null;
   const rules = s.rules && s.rules.length ? el('div', { className: 'fact' }, el('span', { className: 'fk' }, 'Rules'), el('ul', { className: 'rules' }, ...s.rules.map(r => el('li', {}, withTerms(md(r)))))) : null;
-  const all = [row('Takes', io.inputs), row('Gives', io.output), row('Also', io.effects), rules, chips('Calls →', s.calls), chips('Called by ←', s.calledBy)].filter(Boolean);
+  // The lines to look at first, numbered like the markers in the code; clicking one brings it into view.
+  const look = s.keyLines && s.keyLines.length ? el('div', { className: 'fact' }, el('span', { className: 'fk' }, 'Look at'),
+    el('ol', { className: 'looks' }, ...s.keyLines.map((k, i) => el('li', {}, el('button', { className: 'link', title: 'Show line ' + k.line, onclick: () => {
+      const r = document.querySelector('.ln[data-no="' + k.line + '"]');
+      if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); r.classList.add('pulse'); setTimeout(() => r.classList.remove('pulse'), 1200); }
+    } }, el('span', { className: 'knum' }, String(i + 1)), ' line ' + k.line), ' ' + k.note)))) : null;
+  const all = [look, row('Takes', io.inputs), row('Gives', io.output), row('Also', io.effects), rules, chips('Calls →', s.calls), chips('Called by ←', s.calledBy)].filter(Boolean);
   return all.length ? el('div', { className: 'facts' }, ...all) : null;
 }
 
@@ -1386,10 +1415,12 @@ function codeWalk() {
   gone(c.first - 1);
   c.lines.forEach((text, j) => {
     const no = c.first + j, on = no >= a && no <= b;
-    const row = el('div', { className: 'ln' + (on ? ' hl' : '') + (on && no === a ? ' top' : '') + (added.has(no) ? ' add' : ''), 'data-no': no }, el('span', { className: 'no' }, String(no)));
+    const key = on ? (s.keyLines || []).findIndex(k => k.line === no) : -1;
+    const row = el('div', { className: 'ln' + (on ? ' hl' : '') + (key >= 0 ? ' key' : '') + (on && no === a ? ' top' : '') + (added.has(no) ? ' add' : ''), 'data-no': no }, el('span', { className: 'no' }, key >= 0 ? el('span', { className: 'knum' }, String(key + 1)) : String(no)));
     const code = el('span', { className: 'src' });
     code.innerHTML = hl(text, c.lang) || ' '; // escaped by hl()
     row.append(code);
+    if (key >= 0) row.append(el('span', { className: 'knote' }, '← ' + s.keyLines[key].note));
     rows.push(row);
     if (no !== b) gone(no);
     if (no === b) { rows.push(zone(s, st.i)); gone(no); }

@@ -61,3 +61,45 @@ test('repairSteps: lines come from the step; a skipped step is asked for again, 
 	assert.deepEqual(s3.names, ['helper']);
 	assert.equal(s1.label, 'Start here');
 });
+
+test('long files are split between functions, never inside one', async () => {
+	const { packChapters } = await import('../prompt');
+	// Lines 0-9 small, 10-209 one 200-line function, 210-299 more small ones (cuts at every function start).
+	const cuts = [0, 5, 10, 120, 210, 250];
+	const spans = packChapters(0, 299, cuts, 150, [[10, 209], [120, 130]]);
+	for (const s of spans) assert.ok(!(s.start > 10 && s.start <= 209), `a part starts inside the big function: ${JSON.stringify(spans)}`);
+	assert.equal(spans[spans.length - 1].end, 299);
+	assert.equal(spans.map(s => s.end - s.start + 1).reduce((a, b) => a + b), 300, 'every line is in exactly one part');
+});
+
+test('language server symbols: exact ranges win, pseudo-symbols are dropped', async () => {
+	const { mergeSymbols } = await import('../steps');
+	const index = [{ name: 'handle', kind: 'function' as const, line: 5, end: 9 }];
+	const server = [
+		{ name: 'handle', kind: 'function' as const, line: 4, end: 12 },               // starts at its decorator, ends where the server says
+		{ name: 'createServer() callback', kind: 'function' as const, line: 20, end: 30 },
+		{ name: 'helper', kind: 'function' as const, line: 14, end: 16 },              // only the server saw it
+	];
+	assert.deepEqual(mergeSymbols(index, server).map(s => [s.name, s.line, s.end]), [['handle', 4, 12], ['helper', 14, 16]]);
+});
+
+test('key lines must sit inside their step; beginner and experienced prompts differ', async () => {
+	const { buildStepsPrompt } = await import('../prompt');
+	const steps = planSteps('h.js', FILE, 1, 12, { firstPart: true, lastPart: true });
+	const draft = { title: 't', summary: 's', steps: steps.map(st => ({ id: st.id, title: 'x', text: 'y',
+		keyLines: st.label === 'function handle' ? [{ line: 8, note: 'stops requests without an id' }, { line: 9, note: 'doubles the stored value' }, { line: 2, note: 'outside the step' }, { line: 8, note: 'dup' }] : [] })) };
+	const handle = repairSteps(draft, steps).value!.scenes.find(s => s.label === 'function handle')!;
+	assert.deepEqual(handle.keyLines, [{ line: 8, note: 'stops requests without an id' }, { line: 9, note: 'doubles the stored value' }]);
+	const ctx = { file: 'h.js', lang: 'javascript', code: FILE, startLine: 1 };
+	assert.match(buildStepsPrompt(ctx, steps), /new to programming[\s\S]*ONE concrete example/);
+	assert.doesNotMatch(buildStepsPrompt(ctx, steps, 1e9, 'experienced'), /new to programming/);
+	assert.match(buildStepsPrompt(ctx, steps), /"keyLines"/);
+});
+
+test('model-placed steps snap to the whole function they point into, without blank edges', async () => {
+	const { snapRange } = await import('../steps');
+	assert.deepEqual(snapRange('h.js', FILE, 8, 9), { startLine: 7, endLine: 10 });   // part of handle → all of handle
+	assert.deepEqual(snapRange('h.js', FILE, 6, 10), { startLine: 7, endLine: 10 });  // a blank first line is trimmed
+	assert.deepEqual(snapRange('h.js', FILE, 3, 10), { startLine: 3, endLine: 10 });  // two functions: kept as given
+	assert.deepEqual(snapRange('h.js', FILE, 12, 12), { startLine: 12, endLine: 12 });
+});

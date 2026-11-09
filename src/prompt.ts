@@ -32,6 +32,8 @@ export interface Scene {
 	rules?: string[];
 	calls?: string[];
 	calledBy?: string[];
+	/** The 1-3 lines that matter most in this step, each with what it does: highlighted more strongly than the rest. */
+	keyLines?: Array<{ line: number; note: string }>;
 }
 
 /**
@@ -217,18 +219,27 @@ function fileTask(ctx: CodeContext): string {
  * A walkthrough whose steps coee has already chosen (steps.ts): every function, class and method, in call order, with
  * exact lines. The model writes each step; it doesn't choose or move them.
  */
-export function buildStepsPrompt(ctx: CodeContext, steps: readonly Step[], budget = 1e9): string {
+const BEGINNER = `The reader is new to programming, or new to this language. Write for them:
+- Plain everyday words. No jargon without saying what it means in the same sentence.
+- Say WHY before HOW: what problem this code solves for the program, in one sentence they could repeat.
+- Walk through ONE concrete example with real values ("say the request asks for todo 3: \`id\` is 3, so...").
+- The first time a step uses syntax a beginner may not know (an arrow function \`=>\`, \`async\`/\`await\`, destructuring \`{ a, b } = x\`, template strings, \`?.\`, \`??\`, list comprehensions, decorators, generics), explain it in half a sentence.
+- Short sentences. One idea per sentence.`;
+const EXPERIENCED = 'The reader is a working programmer. Skip what any programmer already knows (syntax, obvious names) and spend words on intent, data flow, and the non-obvious.';
+
+export function buildStepsPrompt(ctx: CodeContext, steps: readonly Step[], budget = 1e9, audience: 'beginner' | 'experienced' = 'beginner'): string {
 	const list = steps.map(st => `${st.id} · ${st.label} · lines ${st.startLine}-${st.endLine}${st.signature ? ` · \`${st.signature.slice(0, 120)}\`` : ''}`
 		+ `${st.calls.length ? ` · calls ${st.calls.join(', ')}` : ''}${st.calledBy.length ? ` · called by ${st.calledBy.join(', ')}` : ''}${st.rules.length ? ` · has ${st.rules.length} rule${st.rules.length === 1 ? '' : 's'}` : ''}`).join('\n');
 	const head = `${ROLE}
-${GUIDE}
+${audience === 'beginner' ? BEGINNER : EXPERIENCED}
 
 Explain this ${ctx.lang} code from ${ctx.file} as a step-by-step walkthrough. The steps are already chosen: one per function, class or method, in the order the code runs. Write EVERY step below, in this order, using its id. Don't add, merge, skip or move steps.
 ${list}
 
 For each step:
-- "title": the takeaway, one short sentence (not just the name).
-- "text": 60-140 words. What it's for and why it exists, then how it does it, naming the real variables and calls. Explain the non-obvious parts: an edge case, a trick, a gotcha, why it's written this way. For "Start here": what this file is for, what it imports and keeps, and where execution enters. For "How it fits together": how the steps work together, as one story from where it starts to what it produces. For "Small helpers": one sentence per helper.
+- "title": what it does, in plain words, one short sentence (not just the name).
+- "text": 60-140 words. Why it exists, then how it works with one concrete example, naming the real variables and calls. Then the part that surprises people: an edge case, a trick, why it's written this way.
+- "keyLines": the 1-3 lines in this step that matter most (where the decision is made, the value is computed, the data is saved or sent), each {"line": its number as shown at the left, within the step's lines, "note": what that line does, under 12 words}. For "Start here": what this file is for, what it imports and keeps, and where execution enters. For "How it fits together": how the steps work together, as one story from where it starts to what it produces. For "Small helpers": one sentence per helper.
 - "inputs": what it takes (parameters, and what each means), "output": what it returns or produces, "effects": state it changes, I/O, network, files, or other calls with consequences. Plain words, one line each; omit when there's nothing.
 - "rules": the business rules and guards inside it in plain words, one per item ("a title is required", "only the owner can cancel"); omit when there are none.
 - "diagram": only when a picture helps (a branchy flow, calls back and forth, a lifecycle).
@@ -236,7 +247,7 @@ ${surroundings(ctx, 1500)}
 ${DIAGRAM_RULES}
 
 Reply with ONLY JSON, no prose:
-{"title": string, "summary": string (one or two sentences: what this code is for), ${LEARNING_SCHEMA}, "steps": [{"id": string, "title": string, "text": string, "inputs"?: string, "output"?: string, "effects"?: string, "rules"?: [string], ${DIAGRAM_SCHEMA}}]}
+{"title": string, "summary": string (one or two sentences: what this code is for), ${LEARNING_SCHEMA}, "steps": [{"id": string, "title": string, "text": string, "keyLines"?: [{"line": number, "note": string}], "inputs"?: string, "output"?: string, "effects"?: string, "rules"?: [string], ${DIAGRAM_SCHEMA}}]}
 
 \`\`\``;
 	return `${head}
@@ -271,6 +282,11 @@ export function repairSteps(draft: any, steps: readonly Step[]): { value?: Walkt
 		if (st.calledBy.length) scene.calledBy = st.calledBy;
 		const diagram = repairDiagram(x?.diagram ?? x?.mermaid);
 		if (diagram) scene.diagram = diagram;
+		// Key lines must sit inside the step: a number outside it would highlight the wrong code.
+		const keys = (Array.isArray(x?.keyLines) ? x.keyLines : []).map((k: any) => ({ line: int(k?.line), note: str(k?.note, 120) }))
+			.filter((k: { line: number; note: string }) => k.note && k.line >= st.startLine && k.line <= st.endLine)
+			.filter((k: { line: number }, i: number, a: Array<{ line: number }>) => a.findIndex(o => o.line === k.line) === i).slice(0, 3);
+		if (keys.length) scene.keyLines = keys;
 		return scene;
 	});
 	const errors = missing.length ? [`These steps are missing their "text": ${missing.join(', ')}. Write every step, by id.`] : [];
@@ -799,13 +815,19 @@ export function repairTerms(raw: unknown): Term[] {
  * Split lines [first, last] (0-based, inclusive) into parts of at most `size` lines, cutting at a candidate
  * line (symbol starts, else blank lines) in the back half of each part when there is one.
  */
-export function packChapters(first: number, last: number, cuts: number[], size = 150): Array<{ start: number; end: number }> {
-	const sorted = [...new Set(cuts)].filter(c => c > first && c <= last).sort((a, b) => a - b);
+export function packChapters(first: number, last: number, cuts: number[], size = 150, protect: ReadonlyArray<[number, number]> = [], longest = 400): Array<{ start: number; end: number }> {
+	// A cut inside a function would split one step over two parts and cut its highlight short: functions up to `longest`
+	// lines (`protect`, 0-based inclusive) stay whole, even if their part runs over `size`.
+	const inside = (c: number) => protect.find(([a, b]) => a < c && c <= b && b - a < longest);
+	const sorted = [...new Set(cuts)].filter(c => c > first && c <= last && !inside(c)).sort((a, b) => a - b);
 	const out: Array<{ start: number; end: number }> = [];
 	let cur = first;
 	while (last - cur + 1 > size) {
 		const max = cur + size, min = cur + Math.floor(size / 2);
-		const cut = [...sorted].reverse().find(c => c <= max && c >= min) ?? max;
+		let cut = [...sorted].reverse().find(c => c <= max && c >= min) ?? sorted.find(c => c > cur && c <= max) ?? max;
+		const within = inside(cut);
+		if (within) cut = within[1] + 1; // finish the function first
+		if (cut > last) break;
 		out.push({ start: cur, end: cut - 1 });
 		cur = cut;
 	}

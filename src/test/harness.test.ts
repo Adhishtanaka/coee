@@ -17,6 +17,8 @@ interface Expected {
 	entries: string[]; functions: Record<string, string[]>; routes: Array<[string, string]>;
 	dtos: Array<[string, string, string[]]>; rules: Array<[string, string]>; calls: Array<[string, string]>;
 	core?: string; flaws: Record<string, string[]>;
+	/** Exact walkthrough step ranges, by file and symbol: what must be highlighted, first and last line. */
+	steps?: Record<string, Record<string, [number, number]>>;
 }
 function load(dir: string) {
 	const files: Array<{ path: string; text: string }> = [];
@@ -61,7 +63,13 @@ for (const name of fs.readdirSync(ROOT).filter(d => fs.existsSync(path.join(ROOT
 				const step = steps.find(st => st.names.includes(fn));
 				assert.ok(step, `${file}: no step for ${fn}`);
 				const sym = fi.symbols.find(sy => sy.name === fn)!;
-				if (step!.kind === 'symbol') assert.deepEqual([step!.startLine, step!.endLine], [sym.line, sym.end], `${file}: ${fn} lines`);
+				if (step!.kind === 'symbol') {
+					// The step ends where the function ends, and starts at it or at what belongs to it (decorators, doc comment).
+					assert.equal(step!.endLine, sym.end, `${file}: ${fn} ends`);
+					assert.ok(step!.startLine <= sym.line, `${file}: ${fn} starts`);
+					const head = text.split('\n').slice(step!.startLine - 1, sym.line - 1);
+					assert.ok(head.every(l => /^\s*(@|\/\/|\/\*|\*|#)/.test(l)), `${file}: ${fn} starts with only decorators or comments above it: ${head.join(' | ')}`);
+				}
 			}
 			assert.ok(steps.length <= 12, `${file}: ${steps.length} steps`);
 		}
@@ -77,6 +85,20 @@ for (const name of fs.readdirSync(ROOT).filter(d => fs.existsSync(path.join(ROOT
 			assert.deepEqual(fields.filter(fl => !d!.fields.some(y => y.name === fl)), [], `${dto} fields`);
 		}
 		for (const [file, text] of x.rules) assert.ok(f.rules.some(r => r.file === file && r.text.includes(text)), `rule "${text}"`);
+	});
+
+	if (x.steps) test(`harness ${name}: every step highlights exactly its code`, () => {
+		const wrong: string[] = [];
+		for (const [file, want] of Object.entries(x.steps!)) {
+			const text = files.find(f => f.path === file)!.text;
+			const steps = planSteps(file, text, 1, text.split('\n').length, { firstPart: true, lastPart: true });
+			for (const [name, [a, b]] of Object.entries(want)) {
+				const st = steps.find(s => s.names.includes(name));
+				if (!st) wrong.push(`${file}: no step for ${name}`);
+				else if (st.startLine !== a || st.endLine !== b) wrong.push(`${file}: ${name} is ${st.startLine}-${st.endLine}, should be ${a}-${b}`);
+			}
+		}
+		assert.deepEqual(wrong, []);
 	});
 
 	test(`harness ${name}: the planted flaws are caught by the rules`, () => {

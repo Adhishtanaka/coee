@@ -382,6 +382,20 @@
           "default": true,
           "order": 3,
           "markdownDescription": "Keep finished walkthroughs, so reopening one is instant. Any edit to the code gets a fresh explanation anyway.\n\n[Clear coee's cache](command:coee.clearCache) removes saved walkthroughs, the recent list and saved system maps."
+        },
+        "coee.audience": {
+          "type": "string",
+          "enum": [
+            "beginner",
+            "experienced"
+          ],
+          "enumDescriptions": [
+            "Plain words, why before how, a worked example, and new syntax explained the first time it appears.",
+            "Skip the basics; focus on intent, data flow and the non-obvious."
+          ],
+          "default": "beginner",
+          "order": 1,
+          "description": "Who walkthroughs are written for."
         }
       }
     },

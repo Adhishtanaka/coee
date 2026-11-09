@@ -1,0 +1,16 @@
+{
+  "entries": [],
+  "functions": {
+    "tricky.js": ["renderPage", "isValidTitle", "totals", "constructor", "add"],
+    "service.py": ["log_calls", "remove", "report"]
+  },
+  "routes": [["POST", "tricky.js"]],
+  "dtos": [],
+  "rules": [["tricky.js", "title must be 1-80 characters"], ["service.py", "not enough stock"]],
+  "calls": [["add", "isValidTitle"]],
+  "flaws": {},
+  "steps": {
+    "tricky.js": { "renderPage": [4, 13], "isValidTitle": [15, 18], "totals": [20, 23], "TodoStore": [25, 25], "constructor": [26, 28], "add": [30, 35], "POST /todos": [38, 41] },
+    "service.py": { "log_calls": [4, 9], "Inventory": [12, 13], "remove": [18, 23], "report": [26, 28] }
+  }
+}

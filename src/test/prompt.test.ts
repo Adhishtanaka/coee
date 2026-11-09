@@ -114,7 +114,8 @@ test('parseJson salvages a reply cut off mid-scene', () => {
 test('packChapters cuts long ranges at symbol starts', () => {
 	assert.deepEqual(packChapters(0, 99, [50]), [{ start: 0, end: 99 }]);
 	const parts = packChapters(0, 599, [120, 140, 260, 300, 455]);
-	assert.deepEqual(parts, [{ start: 0, end: 139 }, { start: 140, end: 259 }, { start: 260, end: 409 }, { start: 410, end: 559 }, { start: 560, end: 599 }]);
+	// With no symbol start in the back half, an earlier symbol start beats cutting through the middle of one (300, not 410).
+	assert.deepEqual(parts, [{ start: 0, end: 139 }, { start: 140, end: 259 }, { start: 260, end: 299 }, { start: 300, end: 449 }, { start: 450, end: 599 }]);
 	assert.ok(parts.every(p => p.end - p.start + 1 <= 150));
 });
 
