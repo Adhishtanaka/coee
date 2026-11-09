@@ -158,7 +158,7 @@ export const RULES: Rule[] = [
 		pattern: /rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED[^\n]*["']?0|\bverify\s*=\s*False|InsecureSkipVerify\s*:\s*true|CURLOPT_SSL_VERIFYPEER\s*,\s*(false|0)/,
 		why: 'Without the check anyone on the network path can pose as the server and read or change the traffic.', fix: 'Keep verification on; for a private CA, pass its certificate instead.' },
 	{ id: 'cors-any', title: 'CORS open to every site', severity: 'medium', cwe: 'CWE-942', owasp: 'A05', files: CODE,
-		pattern: /Access-Control-Allow-Origin["']?\s*[,:]\s*["']\*["']|\borigin\s*:\s*(["']\*["']|true)\b/,
+		pattern: /Access-Control-Allow-Origin["']?\s*[,:]\s*["']\*["']|\borigin\s*:\s*(["']\*["']|true\b)/,
 		why: 'Any website can call this API from a visitor\'s browser and read the answers.', fix: 'List the origins that may call it.' },
 	{ id: 'debug-on', title: 'Debug mode on', severity: 'medium', cwe: 'CWE-489', owasp: 'A05', files: PY, pattern: /\bDEBUG\s*=\s*True\b|\.run\([^)]*debug\s*=\s*True/,
 		why: 'Debug pages show source code and settings, and some (like Werkzeug\'s) let visitors run code.', fix: 'Read the flag from the environment and keep it off in production.' },
@@ -167,6 +167,80 @@ export const RULES: Rule[] = [
 		why: 'Anyone can make a token that says they are any user.', fix: 'Verify the signature with a fixed list of algorithms (for example ["HS256"]).' },
 	{ id: 'cookie-flags', title: 'Cookie without protection flags', severity: 'low', cwe: 'CWE-1004', owasp: 'A05', files: CODE, pattern: /\b(httpOnly|secure)\s*:\s*false\b/i,
 		why: 'Without httpOnly scripts can steal the cookie; without secure it travels over plain HTTP.', fix: 'Set httpOnly: true, secure: true and sameSite.' },
+	// --- A01 Broken access control (and API1 object-level authorization, API3 mass assignment)
+	{ id: 'idor-lookup', title: 'Record fetched by an id from the request', severity: 'medium', cwe: 'CWE-639', owasp: 'A01', files: CODE,
+		pattern: /\b(findById|findByPk|findOne|findUnique|get_object_or_404|getById|get|delete|destroy|remove|update|findByIdAndUpdate|findByIdAndDelete)\w*\s*\(\s*(?:\{\s*(?:where\s*:\s*\{\s*)?id\s*:\s*)?(req|request)\.(params|query|body|args|GET|POST)\b[.\[]?['"]?\w*id\b/i,
+		why: 'Anyone can change the id in the URL. Unless the code also checks the record belongs to the user, they can read or change other people\'s data (IDOR).', fix: 'Look the record up together with the owner (where id = ? and ownerId = currentUser), or check ownership before using it.' },
+	{ id: 'mass-assignment', title: 'Request body saved as-is', severity: 'medium', cwe: 'CWE-915', owasp: 'A01', files: CODE,
+		pattern: /\.(create|insert|insertOne|update|updateOne|save|findByIdAndUpdate|findOneAndUpdate|build)\s*\(\s*(?:[^,()]+,\s*)?(req|request)\.(body|json|data|form)\b\s*[,)]|Object\.assign\(\s*\w+\s*,\s*(req|request)\.body\s*\)|\(\s*\*\*\s*(request\.(json|data|form)|data\.dict\(\)|payload)/,
+		why: 'Every field the client sends is written, including ones it shouldn\'t control (role, isAdmin, ownerId, price).', fix: 'Copy only the allowed fields, or validate the body against a schema that lists them.' },
+	{ id: 'csrf-off', title: 'CSRF protection turned off', severity: 'medium', cwe: 'CWE-352', owasp: 'A01', files: CODE, pattern: /@csrf_exempt\b|csrf\s*[:=]\s*(false|False)\b|\.csrf\(\)\.disable\(\)|WTF_CSRF_ENABLED\s*=\s*False/,
+		why: 'Another site can make a logged-in user\'s browser send this request on their behalf.', fix: 'Keep CSRF protection on, or use SameSite cookies and a token for state-changing requests.' },
+
+	// --- A02 Cryptographic failures (more)
+	{ id: 'jwt-secret-literal', title: 'JWT signed with a secret written in the code', severity: 'high', cwe: 'CWE-321', owasp: 'A02', files: JS, pattern: /\bjwt\.(sign|verify)\s*\([^,]+,\s*['"`][^'"`]{2,}['"`]/,
+		why: 'Anyone with the code can sign their own tokens and log in as any user.', fix: 'Read the secret from the environment or a secrets manager, and rotate it.' },
+	{ id: 'plain-http', title: 'Data sent over plain HTTP', severity: 'low', cwe: 'CWE-319', owasp: 'A02', files: CODE,
+		pattern: /\b(fetch|axios\.\w+|axios|got|request|http\.get|requests\.(get|post|put)|urlopen)\s*\(\s*['"`]http:\/\/(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/,
+		why: 'Anyone on the network path can read or change the request and the answer.', fix: 'Use https://.' },
+
+	// --- A03 Injection (more)
+	{ id: 'nosql-injection', title: 'Query built from the request object', severity: 'high', cwe: 'CWE-943', owasp: 'A03', files: CODE,
+		pattern: /\.(find|findOne|findOneAndUpdate|updateMany|deleteMany|aggregate|count|countDocuments)\s*\(\s*(req|request)\.(body|query|params|args)\b|\$where\s*:/,
+		why: 'A client can send operators like {"$ne": null} or {"$gt": ""} instead of values and match any record (logging in without a password, reading everything).', fix: 'Pick the fields and check their types (strings, numbers) before building the query.' },
+	{ id: 'template-injection', title: 'Template built from the request', severity: 'high', cwe: 'CWE-1336', owasp: 'A03', files: CODE,
+		pattern: /\b(render_template_string|Template|ejs\.render|pug\.render|nunjucks\.renderString|Handlebars\.compile|_\.template)\s*\(\s*(f['"]|[^)]*\b(req|request)\.)/,
+		why: 'Template syntax in the input runs on the server: reading secrets, or running code.', fix: 'Keep templates fixed and pass user data as variables.' },
+
+	// --- A04 Insecure design (and API4 unrestricted resource consumption)
+	{ id: 'body-no-limit', title: 'Request bodies of any size accepted', severity: 'low', cwe: 'CWE-770', owasp: 'A04', files: JS, pattern: /\b(express|bodyParser)\.(json|urlencoded|raw|text)\(\s*\)/,
+		why: 'Without a limit a client can send huge bodies and exhaust memory.', fix: 'Pass a limit, e.g. express.json({ limit: "100kb" }).' },
+	{ id: 'upload-unrestricted', title: 'File uploads without limits', severity: 'medium', cwe: 'CWE-434', owasp: 'A04', files: JS, pattern: /\bmulter\s*\(\s*(\)|\{(?![^}]*\b(limits|fileFilter)\b)[^}]*\})/,
+		why: 'Any file type and size is accepted: huge files fill the disk, and an uploaded script may be served or run.', fix: 'Set limits.fileSize and a fileFilter for the allowed types; store uploads outside the web root.' },
+	{ id: 'regex-from-input', title: 'Regular expression built from the request', severity: 'medium', cwe: 'CWE-1333', owasp: 'A04', files: CODE, pattern: /new\s+RegExp\s*\(\s*(req|request)\.|re\.(compile|match|search)\s*\(\s*(request|req)\./,
+		why: 'A crafted pattern can take seconds per match (ReDoS) and stall the server.', fix: 'Escape the input (treat it as text), or limit what patterns are allowed.' },
+
+	// --- A05 Security misconfiguration (more)
+	{ id: 'error-leak', title: 'Error details sent to the client', severity: 'low', cwe: 'CWE-209', owasp: 'A05', files: CODE,
+		pattern: /\b(res\.(send|json|status\(\d+\)\.(send|json))|send\w*\s*\(\s*res\s*,\s*\d+\s*,)\s*\(?[^)]*\b(err|error|e)\.(stack|message)\b|traceback\.format_exc\(\)/,
+		why: 'Stack traces and raw error messages tell an attacker about your code, libraries and data.', fix: 'Log the details on the server; send the client a generic message and an id.' },
+	{ id: 'serve-index', title: 'Directory listing turned on', severity: 'low', cwe: 'CWE-548', owasp: 'A05', files: CODE, pattern: /\bserveIndex\s*\(|autoindex\s+on|Options\s+\+?Indexes/,
+		why: 'Anyone can browse the files in that folder, including ones not meant to be public.', fix: 'Turn directory listing off.' },
+
+	// --- A06 Vulnerable and outdated components (with the dependency audit)
+	{ id: 'dep-unpinned', title: 'Dependency version not pinned', severity: 'low', cwe: 'CWE-1104', owasp: 'A06', files: /(^|\/)(package\.json|requirements[\w.-]*\.txt)$/,
+		pattern: /^\s*"[@\w./-]+"\s*:\s*"(\*|latest|x|>=?\s*\d[^"]*)"|^\s*[A-Za-z][\w.-]*\s*$|^\s*[A-Za-z][\w.-]*\s*>=\s*[\d.]+\s*$/,
+		why: 'Any version can be installed, including one with a known hole or a hijacked release, and builds aren\'t repeatable.', fix: 'Pin a version range (e.g. "^4.19.2") and commit the lockfile; for pip, pin with == and use a lock file.' },
+
+	// --- A07 Identification and authentication failures (more)
+	{ id: 'plaintext-password', title: 'Password compared in plain text', severity: 'high', cwe: 'CWE-256', owasp: 'A07', files: CODE,
+		pattern: /\b\w*password\w*\s*[!=]==?\s*\w+\.(password|pass|pwd)\b|\b\w+\.(password|pass|pwd)\s*[!=]==?\s*\w*password\w*/i,
+		why: 'Comparing stored passwords directly means they are stored unhashed: one leak exposes every user\'s password.', fix: 'Store a slow hash (bcrypt, scrypt, argon2) and compare with the library\'s verify function.' },
+	{ id: 'jwt-no-expiry', title: 'Token that never expires', severity: 'low', cwe: 'CWE-613', owasp: 'A07', files: JS, pattern: /\bjwt\.sign\s*\((?![^)]*expiresIn)[^)]*\)/,
+		why: 'A stolen token works forever.', fix: 'Pass expiresIn (e.g. "15m") and refresh tokens when needed.' },
+
+	// --- A08 Software and data integrity failures (more)
+	{ id: 'prototype-pollution', title: 'Request merged into an object', severity: 'medium', cwe: 'CWE-1321', owasp: 'A08', files: JS, pattern: /\b(_\.merge|_\.defaultsDeep|merge|deepmerge|extend)\s*\([^)]*\b(req|request)\.(body|query)\b|\[\s*['"]__proto__['"]\s*\]/,
+		why: 'A key like "__proto__" in the request changes every object in the app: logic changes, and sometimes code execution.', fix: 'Copy known fields, or use a merge that skips __proto__ and constructor (and Object.create(null) maps).' },
+	{ id: 'script-no-integrity', title: 'Third-party script without integrity check', severity: 'low', cwe: 'CWE-353', owasp: 'A08', files: /\.(html?|vue|jsx|tsx|ejs|hbs|php)$/i, pattern: /<script\b(?![^>]*\bintegrity=)[^>]*\bsrc=["']https?:\/\/(?!localhost)/i,
+		why: 'If the CDN is compromised, its script runs in your page with your users\' sessions.', fix: 'Add integrity="sha384-…" and crossorigin, or host the script yourself.' },
+	{ id: 'dynamic-require', title: 'Module loaded by a name from the request', severity: 'high', cwe: 'CWE-829', owasp: 'A08', files: CODE, pattern: /\b(require|import|importlib\.import_module|__import__)\s*\(\s*(req|request)\./,
+		why: 'The client chooses which code runs.', fix: 'Map allowed names to modules with a fixed table.' },
+
+	// --- A09 Security logging and monitoring failures
+	{ id: 'log-secret', title: 'Secret written to the logs', severity: 'medium', cwe: 'CWE-532', owasp: 'A09', files: CODE,
+		pattern: /\b(console\.(log|info|debug|warn|error)|logger\.\w+|log\.\w+|logging\.\w+|print)\s*\([^)]*\b(password|passwd|secret|token|api[_-]?key|authorization|cookie|credit_?card|ssn)\b/i,
+		why: 'Logs are copied, shipped and kept for a long time; secrets in them leak to everyone who can read them.', fix: 'Leave secrets out of log messages, or mask them.' },
+	{ id: 'log-injection', title: 'Request data logged as-is', severity: 'low', cwe: 'CWE-117', owasp: 'A09', files: CODE, pattern: /\b(console\.(log|info|warn|error)|logger\.\w+|logging\.\w+)\s*\([^)]*\b(req|request)\.(body|query|params|headers|args|form)\b/,
+		why: 'A value with newlines can forge log entries and hide an attack.', fix: 'Log selected fields, with newlines escaped (most structured loggers do this).' },
+	{ id: 'empty-catch', title: 'Error swallowed silently', severity: 'low', cwe: 'CWE-390', owasp: 'A09', files: CODE, pattern: /\bcatch\s*(\(\s*\w*\s*\))?\s*\{\s*\}|^\s*except(\s+[\w.]+)?(\s+as\s+\w+)?\s*:\s*pass\s*$/,
+		why: 'Failures, including attacks, leave no trace, so nobody notices.', fix: 'Log the error (and rethrow if the caller should know).' },
+
+	// --- A10 Server-side request forgery (more)
+	{ id: 'ssrf-variable', title: 'Server fetches a URL built from the request', severity: 'medium', cwe: 'CWE-918', owasp: 'A10', files: CODE,
+		pattern: /\b(fetch|axios(\.(get|post|request))?|got|http\.get|https\.get|urlopen|requests\.(get|post))\s*\(\s*(`[^`]*\$\{\s*(req|request)\.|[^,)]*\+\s*(req|request)\.|f["'][^"']*\{\s*request\.)/,
+		why: 'Part of the address comes from the client, so they can point your server at internal hosts.', fix: 'Build URLs from an allow-list of hosts; never put request data in the host part.' },
+
 ];
 
 const globals = new Map<RegExp, RegExp>();

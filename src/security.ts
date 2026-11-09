@@ -2,7 +2,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import { Finding, HitRef, Scene, SecurityReport, Snippet, Walkthrough, batchFiles, buildSecurityPrompt, depFinding, mergeReports, repairSecurity, ruleFinding, toSarif } from './prompt';
-import { OWASP, scanText } from './rules';
+import { OWASP, RULES, scanText } from './rules';
+
+/** The categories the whole-project design checks (facts.ts) look at: missing auth, missing rate limits, missing headers. */
+const DESIGN_CHECKS = ['A01', 'A04', 'A05'];
 import { auditDependencies } from './deps';
 import { diagramSvg } from './layout';
 import { Lm, isCancel, log } from './lm';
@@ -11,7 +14,8 @@ import { digest, readFiles } from './walkthrough';
 import { createPanel, page, showLines } from './ui';
 import { addCode, fileText, fixSnippet } from './apply';
 import { indexProject } from './codeindex';
-import { TraceStep, proofCommand, proofPath, traceAttack } from './proof';
+import { designChecks, projectFacts } from './facts';
+import { INPUT_DRIVEN, TraceStep, proofCommand, proofPath, traceAttack } from './proof';
 
 const CACHE_KEY = 'coee.security';
 const DISMISS_KEY = 'coee.security.dismissed';
@@ -38,6 +42,8 @@ interface PageState {
 	focus?: string;
 	/** Per finding: the attack's path through the code, source first, with the best place for the fix. */
 	traces?: Record<string, TraceStep[]>;
+	/** Every OWASP Top 10 category: how many checks ran and what they found. */
+	coverage?: Array<{ code: string; name: string; checks: number; findings: number }>;
 	/** Per finding: what running its proof test showed. */
 	proofs?: Record<string, { status: 'running' | 'vulnerable' | 'safe' | 'error'; note?: string; file?: string }>;
 }
@@ -190,7 +196,11 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 			const scopeText = this.state.scope!;
 			const report = await this.cached({ v: VERSION, root: root.toString(), target: target.toString(), code: digest(files) }, fresh, async () => {
 				// 1. Rules: instant, and shown at once while the rest runs.
-				const hits: HitRef[] = files.flatMap(f => scanText(f.path, f.text));
+				// Line rules, plus checks on how the project is put together (no auth on a route that changes data, no rate limit
+				// on login, no security headers). Both go to the model to confirm or reject.
+				const fx = new Map(files.map(f => [f.path, f.text]));
+				const design: HitRef[] = isFile ? [] : designChecks(projectFacts(indexProject(files), fx), fx).map(d => ({ ...d, id: `${d.rule}:${d.file}:${d.line}` }));
+				const hits: HitRef[] = [...files.flatMap(f => scanText(f.path, f.text)), ...design];
 				const ruleOnly: SecurityReport = { summary: '', findings: hits.map(ruleFinding) };
 				this.show({ report: mergeReports([ruleOnly]), reading: 'dependencies' });
 				// 2. Dependencies (a project or folder scan only).
@@ -230,8 +240,11 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 			for (const f of report.findings) this.ids.set(f.id, await fingerprint(root, f));
 			const gone = new Set(this.ext.workspaceState.get<string[]>(DISMISS_KEY, []));
 			const idx = indexProject(files), texts = new Map(files.map(f => [f.path, f.text]));
-			const traces = Object.fromEntries(report.findings.filter(f => f.source !== 'dependency' && idx.files.has(f.file)).map(f => [f.id, traceAttack(idx, f.file, f.startLine, texts)]));
-			this.show({ traces, proofs: {}, report, svgs: this.svgs(report), dismissed: report.findings.filter(f => gone.has(this.ids.get(f.id)!)).map(f => f.id), scanned: files.length, left: all.length - files.length, reading: undefined });
+			const traces = Object.fromEntries(report.findings.filter(f => f.source !== 'dependency' && idx.files.has(f.file) && (!f.cwe || INPUT_DRIVEN.has(f.cwe))).map(f => [f.id, traceAttack(idx, f.file, f.startLine, texts)]));
+			const coverage = [...Object.entries(OWASP)].map(([code, o]) => ({ code, name: o.name,
+				checks: RULES.filter(r => r.owasp === code).length + DESIGN_CHECKS.filter(c => c === code).length + (code === 'A06' ? 1 : 0),
+				findings: report.findings.filter(f => f.owasp === code).length }));
+			this.show({ coverage, traces, proofs: {}, report, svgs: this.svgs(report), dismissed: report.findings.filter(f => gone.has(this.ids.get(f.id)!)).map(f => f.id), scanned: files.length, left: all.length - files.length, reading: undefined });
 			this.publish();
 		} catch (err) {
 			if (gen !== this.gen || isCancel(err) || (err instanceof Error && err.message === 'cancelled')) return;
@@ -423,6 +436,13 @@ details.learn summary { cursor: pointer; color: var(--link); }
 .reading { display: flex; gap: 12px; align-items: center; color: var(--muted); }
 .reading .sweep { flex: 0 0 80px; }
 .rejected li { margin: 4px 0; }
+.owasp { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.otile { display: grid; gap: 2px; text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--vscode-editorWidget-background); color: var(--vscode-foreground); }
+.otile.hit { border-color: var(--vscode-editorWarning-foreground, #cca700); }
+.ocode { font-family: var(--mono); font-size: .78em; color: var(--muted); }
+.oname { font-size: .88em; font-weight: 600; line-height: 1.3; }
+.ostat { font-size: .8em; color: var(--vscode-testing-iconPassed, #3fb950); }
+.otile.hit .ostat { color: var(--vscode-editorWarning-foreground, #cca700); }
 .trace { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
 .trace li.sink > span:first-child { color: var(--c); font-weight: 600; }
 .fixbadge { margin-left: 8px; font-size: .75em; padding: 0 6px; border-radius: 3px; border: 1px solid var(--vscode-testing-iconPassed, #3fb950); color: var(--vscode-testing-iconPassed, #3fb950); }
@@ -507,11 +527,15 @@ function render() {
     st.report.summary ? el('p', { className: 'lede' }, st.report.summary) : null);
   root.replaceChildren(bar, el('div', { className: 'wrap' }, el('article', {},
     head,
+    st.coverage ? el('div', { className: 'owasp' }, ...st.coverage.map(c => el('button', { className: 'otile' + (c.findings ? ' hit' : ''), title: c.checks + ' checks' + (c.code === 'A06' ? ', plus the dependency audit' : '') + (c.code === 'A04' || c.code === 'A01' ? ', plus the model reading the design' : ''),
+      onclick: () => { const g = document.getElementById('g-' + c.code); if (g) g.scrollIntoView({ behavior: 'smooth' }); } },
+      el('span', { className: 'ocode' }, c.code === 'MEM' ? 'C/C++' : c.code), el('span', { className: 'oname' }, c.name),
+      el('span', { className: 'ostat' }, c.findings ? c.findings + ' found' : '✓ ' + c.checks + ' checks clean')))) : null,
     st.reading ? reading(st.reading) : null,
     st.note ? el('p', { className: 'note warn' }, st.note) : null,
     all.length ? el('div', { className: 'filters' }, chipRow(SEV.map(s => [s, s]), hideSev, counts), chipRow(SRC, hideSrc, k => all.filter(f => (f.source || 'model') === k).length)) : null,
     !all.length && !st.reading ? el('div', { className: 'clean' }, 'coee read ' + st.scanned + ' file' + (st.scanned === 1 ? '' : 's') + ' and found nothing it could point at. That is not a guarantee: it reads code, not a running system, and can miss things.') : null,
-    ...groups.map(g => el('div', { className: 'group' },
+    ...groups.map(g => el('div', { className: 'group', id: 'g-' + g },
       el('header', {}, el('h2', {}, OWASP[g] ? OWASP[g].name : 'Other'), el('span', { className: 'code' }, g === 'MEM' ? 'memory safety' : g !== 'other' ? 'OWASP ' + g : '')),
       OWASP[g] ? el('details', { className: 'learn' }, el('summary', {}, 'What is this?'), el('p', {}, OWASP[g].learn)) : null,
       ...shown.filter(f => (f.owasp || 'other') === g).map(f => finding(f, false)))),

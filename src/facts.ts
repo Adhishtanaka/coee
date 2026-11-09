@@ -118,3 +118,41 @@ export function callSites(idx: ProjectIndex, texts: ReadonlyMap<string, string>,
 	}
 	return out;
 }
+
+/** A problem in how the project is put together, rather than on one line. Fed to the model like a rule hit. */
+export interface DesignHit { rule: string; title: string; severity: 'high' | 'medium' | 'low'; cwe: string; owasp: string; file: string; line: number; text: string; why: string; fix: string }
+
+const AUTHY = /auth|login|user|token|session|role|permission|jwt|passport|guard|admin|owner|forbidden|40[13]/i;
+
+/**
+ * Whole-project checks the line rules can't make: routes that change data with no auth in sight (A01), login-like
+ * routes with no rate limiting anywhere (A04, brute force), and a web app without security headers (A05).
+ */
+export function designChecks(facts: Facts, texts: ReadonlyMap<string, string>): DesignHit[] {
+	const all = [...texts.values()].join('\n');
+	const out: DesignHit[] = [];
+	const lineText = (file: string, line: number) => texts.get(file)?.split('\n')[line - 1]?.trim().slice(0, 160) ?? '';
+	// Auth applied to everything (app.use(passport.authenticate…) / app.use(requireUser) with no path) covers every route.
+	const globalAuth = /\.use\(\s*(?!['"`])[^)]*(auth|passport|jwt|requireUser|login|session|guard)/i.test(all);
+	for (const r of facts.routes) {
+		if (!/^(POST|PUT|PATCH|DELETE)$/.test(r.method) || globalAuth) continue;
+		const handler = (texts.get(r.file) ?? '').split('\n').slice(r.line - 1, r.line + 25).join('\n');
+		if (r.guards.some(g => AUTHY.test(g)) || /Depends\(\s*\w*(user|auth)|@login_required|req\.user\b|request\.user\b|current_user/i.test(handler)) continue;
+		out.push({ rule: 'design-no-auth', title: `${r.method} ${r.path} changes data with no auth check in sight`, severity: 'medium', cwe: 'CWE-862', owasp: 'A01', file: r.file, line: r.line, text: lineText(r.file, r.line),
+			why: 'Nothing in this route or in front of it checks who is calling, so anyone who can reach the server can change this data.', fix: 'Put an authentication check (middleware or a dependency) in front of the route, and check the user may change this record.' });
+	}
+	const limited = /express-rate-limit|rateLimit\s*\(|RateLimit|slowapi|Limiter\s*\(|throttle|django_ratelimit|ratelimit\b|bottleneck|@nestjs\/throttler/i.test(all);
+	for (const r of facts.routes) {
+		if (limited || !/login|signin|sign-in|session|token|password|reset|otp|verify|auth/i.test(r.path)) continue;
+		out.push({ rule: 'design-no-rate-limit', title: `${r.method} ${r.path} can be tried without limit`, severity: 'medium', cwe: 'CWE-307', owasp: 'A04', file: r.file, line: r.line, text: lineText(r.file, r.line),
+			why: 'There is no rate limiting anywhere in the project, so passwords or codes on this route can be guessed by trying many times quickly.', fix: 'Limit attempts per IP and per account (e.g. express-rate-limit, slowapi), and slow down after failures.' });
+	}
+	for (const [file, text] of texts) {
+		const at = text.split('\n').findIndex(l => /=\s*express\(\s*\)/.test(l));
+		if (at < 0 || /helmet|secure-headers|Content-Security-Policy|X-Frame-Options|Strict-Transport-Security/i.test(all)) continue;
+		out.push({ rule: 'design-no-headers', title: 'No security headers', severity: 'low', cwe: 'CWE-693', owasp: 'A05', file, line: at + 1, text: lineText(file, at + 1),
+			why: 'Browsers get no instructions to block framing, sniffing or mixed content, so clickjacking and some XSS are easier.', fix: 'Add helmet() (or set Content-Security-Policy, X-Frame-Options, Strict-Transport-Security yourself).' });
+		break;
+	}
+	return out;
+}

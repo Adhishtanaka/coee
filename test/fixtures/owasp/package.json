@@ -1,0 +1,7 @@
+{
+  "name": "owasp-sample",
+  "dependencies": {
+    "express": "*",
+    "lodash": "latest"
+  }
+}

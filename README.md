@@ -15,7 +15,18 @@ Understand any codebase without leaving VS Code. coee explains code step by step
 **Plan a change.** Describe a feature or technology you want to introduce. coee identifies the integration points, the affected components, the risks and a sensible order of work, against your real code. It includes the code to add, and always the tests. Each snippet is placed by the code around it, not by line numbers: **Add…** shows the file before and after, adds it when you agree, then checks that it landed in the right place and whether the file got new errors. Code that's already there shows as **Added ✓**, so nothing is added twice.
 
 **Security scan.** Scan a file, a folder or the whole project in three passes:
-- **Fast rules, no model:** 39 checks for hardcoded secrets (AWS, GitHub, Stripe and other key formats, passwords, connection strings), injection (SQL, shell, `eval`), XSS, path traversal, SSRF, open redirects, unsafe deserialization, buffer overflows in C/C++, weak crypto and randomness, disabled TLS checks and insecure configuration.
+- **Fast rules, no model:** 61 checks covering every OWASP Top 10 (2021) category, plus memory safety in C/C++:
+  - **A01 Broken access control:** IDOR lookups, mass assignment, path traversal, open redirects, CSRF turned off.
+  - **A02 Cryptographic failures:** leaked keys (AWS, GitHub, Stripe and more), weak hashes, weak randomness, plain HTTP, TLS checks off, JWT secrets in code.
+  - **A03 Injection:** SQL, NoSQL, shell, `eval`, templates, XSS.
+  - **A04 Insecure design:** no body or upload limits, regexes built from input.
+  - **A05 Security misconfiguration:** error details sent to clients, open CORS, debug mode, directory listing.
+  - **A06 Vulnerable and outdated components:** unpinned dependencies, plus the dependency audit.
+  - **A07 Identification and authentication failures:** plaintext or hardcoded passwords, tokens that never expire, `none` JWTs.
+  - **A08 Software and data integrity failures:** unsafe deserialization, prototype pollution, CDN scripts without integrity, modules loaded by name.
+  - **A09 Security logging and monitoring failures:** secrets in logs, log injection, swallowed errors.
+  - **A10 Server-side request forgery.**
+- **Design checks:** the project as a whole is checked for routes that change data with no auth in sight, logins with no rate limiting, and missing security headers. The page opens with an OWASP Top 10 grid showing what was checked and found in each category.
 - **Dependency advisories:** from `npm audit` or `pip-audit` when installed, otherwise from OSV.dev.
 - **The model:** confirms or rejects each rule hit in context, and finds what patterns can't see, such as missing authorization, IDOR and logic flaws.
 

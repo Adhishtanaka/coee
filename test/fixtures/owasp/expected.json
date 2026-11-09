@@ -1,0 +1,21 @@
+{
+  "entries": [],
+  "functions": {},
+  "routes": [["GET", "a01-access.js"], ["POST", "a01-access.js"]],
+  "dtos": [],
+  "rules": [],
+  "calls": [],
+  "flaws": {
+    "a01-access.js": ["idor-lookup", "mass-assignment", "path-traversal", "open-redirect"],
+    "a02-crypto.js": ["jwt-secret-literal", "weak-hash", "weak-random", "plain-http", "tls-off"],
+    "a03-injection.js": ["nosql-injection", "sql-concat", "js-exec", "xss-inner-html"],
+    "a04-design.js": ["body-no-limit", "upload-unrestricted", "regex-from-input"],
+    "a05-config.js": ["error-leak", "cors-any", "serve-index"],
+    "package.json": ["dep-unpinned"],
+    "a07-auth.js": ["plaintext-password", "jwt-no-expiry", "jwt-none"],
+    "a08-integrity.js": ["prototype-pollution", "dynamic-require"],
+    "page.html": ["script-no-integrity"],
+    "a09-logging.js": ["log-secret", "log-injection", "empty-catch"],
+    "a10-ssrf.js": ["ssrf", "ssrf-variable"]
+  }
+}

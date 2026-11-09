@@ -3,6 +3,9 @@
 // test runner. Pure, so the harness checks traces on the fixtures and the commands chosen.
 import { ProjectIndex } from './codeindex';
 
+/** Problems caused by input from outside: these have a path to trace. A leaked key or weak hash has none. */
+export const INPUT_DRIVEN = new Set(['CWE-78', 'CWE-89', 'CWE-79', 'CWE-22', 'CWE-95', 'CWE-94', 'CWE-918', 'CWE-601', 'CWE-943', 'CWE-1336', 'CWE-639', 'CWE-915', 'CWE-1333', 'CWE-1321', 'CWE-829', 'CWE-117', 'CWE-502', 'CWE-120', 'CWE-242']);
+
 export interface TraceStep { file: string; line: number; endLine: number; label: string; role: 'source' | 'hop' | 'sink'; fixHere?: boolean }
 
 /**
@@ -15,6 +18,18 @@ export function traceAttack(idx: ProjectIndex, file: string, line: number, texts
 	const steps: TraceStep[] = [{ file, line, endLine: line, label: 'The dangerous line: the input is used here', role: 'sink' }];
 	const seen = new Set<string>();
 	let cur = around(file, line), curFile = file;
+	// Inside an inline route handler (`router.get('/x', async (req, res) => { … })`): the route is where input enters.
+	if (!cur) {
+		const routes = [...(idx.files.get(file)?.routes ?? [])].sort((a, b) => a.line - b.line);
+		const r = routes.filter(x => x.line <= line).pop();
+		const next = r && routes.find(x => x.line > r.line);
+		if (r && line < (next?.line ?? r.line + 40)) {
+			steps.push({ file, line: r.line, endLine: r.line, label: `Input enters: ${r.method} ${r.path}`, role: 'source' });
+			steps.reverse();
+			steps[steps.length - 1].fixHere = true;
+			return steps;
+		}
+	}
 	for (let hop = 0; cur && hop < 5; hop++) {
 		const key = `${curFile}:${cur.name}`;
 		if (seen.has(key)) break;
