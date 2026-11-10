@@ -70,6 +70,19 @@ export interface ProofRun { command: string; args: string[]; framework: string }
  * `pythonish`/`goish` say what the project is. Undefined when coee can't tell.
  */
 export function proofCommand(testFile: string, manifest: string | undefined, has: (p: string) => boolean): ProofRun | undefined {
+	const cls = proofClass(testFile);
+	if (/\.(kt|java)$/.test(testFile)) {
+		// Gradle (Android or JVM): the module is the folder before /src/test, e.g. app → :app:test.
+		const mod = /^(.*?)\/?src\/test\//.exec(testFile)?.[1] ?? '';
+		const task = mod ? `:${mod.split('/').join(':')}:test` : 'test';
+		if (has('gradlew') || has('gradlew.bat')) return { command: process.platform === 'win32' ? 'gradlew.bat' : './gradlew', args: [task, '--tests', `*${cls}`], framework: 'Gradle' };
+		if (has('build.gradle') || has('build.gradle.kts') || has('settings.gradle') || has('settings.gradle.kts')) return { command: 'gradle', args: [task, '--tests', `*${cls}`], framework: 'Gradle' };
+		if (has('pom.xml')) return { command: 'mvn', args: ['-q', 'test', ...(mod ? ['-pl', mod] : []), `-Dtest=${cls}`, '-Dsurefire.failIfNoSpecifiedTests=false'], framework: 'Maven' };
+		return undefined;
+	}
+	// SwiftPM packages run with swift test; an Xcode app project needs its scheme, which coee can't know.
+	if (/\.swift$/.test(testFile)) return has('Package.swift') ? { command: 'swift', args: ['test', '--filter', cls], framework: 'swift test' } : undefined;
+	if (/\.dart$/.test(testFile)) return /^\s*flutter\s*:/m.test(manifest ?? '') ? { command: 'flutter', args: ['test', testFile], framework: 'flutter test' } : { command: 'dart', args: ['test', testFile], framework: 'dart test' };
 	if (/\.py$/.test(testFile)) return { command: 'python', args: ['-m', 'pytest', '-q', testFile], framework: 'pytest' };
 	if (/_test\.go$/.test(testFile)) return { command: 'go', args: ['test', `./${testFile.includes('/') ? testFile.slice(0, testFile.lastIndexOf('/')) : '.'}`], framework: 'go test' };
 	if (!/\.[cm]?[jt]sx?$/.test(testFile)) return undefined;
@@ -82,10 +95,37 @@ export function proofCommand(testFile: string, manifest: string | undefined, has
 	return { command: 'node', args: ['--test', testFile], framework: 'node:test' };
 }
 
+/** Where a proof test for `file` goes: beside it (or in the build tool's test folder), named so it's clearly coee's and easy to delete. */
+export function proofClass(testFile: string): string { return (testFile.split('/').pop() ?? '').replace(/\.\w+$/, ''); }
+
+/**
+ * The model's proof test, fitted to where it's saved: Java needs the public class named after the file, and the test
+ * runners above filter by that name, so Kotlin, Java and Swift test classes are renamed to it.
+ */
+export function fitProof(testFile: string, code: string): string {
+	if (!/\.(kt|java|swift)$/.test(testFile)) return code;
+	return code.replace(/\b((?:public\s+|final\s+|internal\s+|open\s+)*class\s+)([A-Za-z_]\w*)/, `$1${proofClass(testFile)}`);
+}
+
 /** Where a proof test for `file` goes: beside it, named so it's clearly coee's and easy to delete. */
 export function proofPath(file: string, id: string): string {
 	const dot = file.lastIndexOf('.'), base = dot > file.lastIndexOf('/') ? file.slice(0, dot) : file, ext = dot > file.lastIndexOf('/') ? file.slice(dot) : '.js';
 	if (ext === '.py') { const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/') + 1) : ''; return `${dir}test_coee_proof_${id}.py`; }
 	if (ext === '.go') return `${base}_coee_proof_${id}_test.go`;
+	const safe = id.replace(/\W/g, '_');
+	// Build tools only run tests from their test folders: the mirror of src/main (Gradle, Maven), Tests/<Target>Tests
+	// (SwiftPM), test/ beside lib/ (Dart, Flutter). The class is named after the file, as Java requires.
+	if (ext === '.kt' || ext === '.java') {
+		const dir = file.slice(0, file.lastIndexOf('/') + 1).replace(/(^|\/)src\/main\/(java|kotlin)\//, '$1src/test/$2/');
+		return `${dir}CoeeProof_${safe}Test${ext}`;
+	}
+	if (ext === '.swift') {
+		const m = /^(.*?)Sources\/([^/]+)\//.exec(file);
+		return m ? `${m[1]}Tests/${m[2]}Tests/CoeeProof_${safe}Tests.swift` : `${base}CoeeProof_${safe}Tests.swift`;
+	}
+	if (ext === '.dart') {
+		const root = /^(.*?)(^|\/)lib\//.exec(file);
+		return `${root ? root[1] + (root[1] ? '/' : '') : file.slice(0, file.lastIndexOf('/') + 1)}test/coee_proof_${safe}_test.dart`;
+	}
 	return `${base}.coee-proof-${id}.test${ext}`;
 }

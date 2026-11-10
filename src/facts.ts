@@ -7,7 +7,8 @@ export interface EntryFact { file: string; why: string }
 export interface RouteFact { method: string; path: string; file: string; line: number; handler?: string; uses: string[]; guards: string[]; part?: string }
 export interface DtoFact { name: string; kind: Dto['kind']; file: string; line: number; end: number; fields: Field[]; usedIn: string[]; validated: boolean; part?: string }
 export interface RuleFact { id: string; text: string; kind: string; file: string; line: number; in?: string; part?: string; plain?: string }
-export interface Facts { entries: EntryFact[]; routes: RouteFact[]; dtos: DtoFact[]; rules: RuleFact[] }
+export interface EventFact { on: string; file: string; line: number; handler?: string; part?: string; /** Where the handler is, when a layout or storyboard names it in another file. */ handlerFile?: string; handlerLine?: number }
+export interface Facts { entries: EntryFact[]; routes: RouteFact[]; events: EventFact[]; dtos: DtoFact[]; rules: RuleFact[] }
 
 /** Which part of the map a file belongs to (the first part that lists it, or shares its folder). */
 export function partOf(parts: ReadonlyArray<{ id: string; files: ReadonlyArray<{ path: string }> }>, file: string): string | undefined {
@@ -55,7 +56,23 @@ export function projectFacts(idx: ProjectIndex, texts: ReadonlyMap<string, strin
 		}
 	}
 	const entries = files.filter(f => f.entry).map(f => ({ file: f.path, why: f.entry! }));
-	return { entries, routes, dtos, rules };
+	// UI and app events, each with the function it sits in (the component or screen) when there is one.
+	// A layout or storyboard names its handler (android:onClick="save"): link it to that method in the code. Several
+	// definitions: the one in a file named like the screen (activity_main.xml → MainActivity) wins, else the first.
+	const findMethod = (name: string, from: string) => {
+		const where = files.flatMap(f => f.symbols.filter(s => s.name === name && s.kind !== 'class').map(s => ({ file: f.path, line: s.line })));
+		const screen = (from.split('/').pop() ?? '').replace(/\.\w+$/, '').split(/[_\-.]/).filter(Boolean).map(w => w.toLowerCase());
+		return where.find(w => screen.length && screen.every(word => (w.file.split('/').pop() ?? '').toLowerCase().includes(word))) ?? where[0];
+	};
+	const events: EventFact[] = files.flatMap(f => f.events.map(e => {
+		const ev: EventFact = { on: e.on, file: f.path, line: e.line, part: partOf(parts, f.path),
+			handler: [...f.symbols].reverse().find(s => s.line <= e.line && e.line <= s.end && s.end - s.line < 400)?.name };
+		const m = e.calls && findMethod(e.calls, f.path);
+		if (e.calls) ev.handler = e.calls;
+		if (m) { ev.handlerFile = m.file; ev.handlerLine = m.line; }
+		return ev;
+	})).slice(0, 200);
+	return { entries, routes, events, dtos, rules };
 }
 
 /** For one use case (its code ranges), the rules it applies and the data shapes it handles, following the calls it makes. */
@@ -153,6 +170,60 @@ export function designChecks(facts: Facts, texts: ReadonlyMap<string, string>): 
 		out.push({ rule: 'design-no-headers', title: 'No security headers', severity: 'low', cwe: 'CWE-693', owasp: 'A05', file, line: at + 1, text: lineText(file, at + 1),
 			why: 'Browsers get no instructions to block framing, sniffing or mixed content, so clickjacking and some XSS are easier.', fix: 'Add helmet() (or set Content-Security-Policy, X-Frame-Options, Strict-Transport-Security yourself).' });
 		break;
+	}
+	return out;
+}
+
+/**
+ * Mobile app settings, where most mobile security problems live: AndroidManifest.xml (exported components, cleartext,
+ * debuggable, backups), the network security config, and iOS's Info.plist (App Transport Security). Whole elements,
+ * not lines, so an attribute on the next line still counts. Pure, like the design checks.
+ */
+export function appConfigChecks(texts: ReadonlyMap<string, string>): DesignHit[] {
+	const out: DesignHit[] = [];
+	for (const [file, text] of texts) {
+		const lineAt = (i: number) => text.slice(0, i).split('\n').length;
+		const hit = (i: number, h: Omit<DesignHit, 'file' | 'line' | 'text'>) => { const line = lineAt(i); out.push({ ...h, file, line, text: text.split('\n')[line - 1].trim().slice(0, 160) }); };
+		if (/(^|\/)AndroidManifest\.xml$/.test(file)) {
+			let m = /android:debuggable\s*=\s*"true"/.exec(text);
+			if (m) hit(m.index, { rule: 'android-debuggable', title: 'App ships debuggable', severity: 'high', cwe: 'CWE-489', owasp: 'A05',
+				why: 'A debuggable app lets anyone with the phone and a cable attach a debugger, read its memory and its private files.', fix: 'Remove android:debuggable; Gradle sets it for debug builds only.' });
+			m = /android:usesCleartextTraffic\s*=\s*"true"/.exec(text);
+			if (m) hit(m.index, { rule: 'android-cleartext', title: 'App allows plain HTTP', severity: 'medium', cwe: 'CWE-319', owasp: 'A02',
+				why: 'Traffic over plain HTTP can be read and changed by anyone on the same Wi-Fi.', fix: 'Remove usesCleartextTraffic and use HTTPS; allow a single dev host in network_security_config.xml if you must.' });
+			m = /android:allowBackup\s*=\s*"true"/.exec(text);
+			if (m) hit(m.index, { rule: 'android-allow-backup', title: 'App data can be copied off by backup', severity: 'low', cwe: 'CWE-530', owasp: 'A05',
+				why: 'With backups on, the app\'s private files (tokens, databases) can be pulled off the phone with adb backup or restored onto another device.', fix: 'Set android:allowBackup="false", or exclude sensitive files with dataExtractionRules / fullBackupContent.' });
+			// Components other apps can start: exported, with no permission, and not the launcher screen (which must be exported).
+			for (const c of text.matchAll(/<(activity|activity-alias|service|receiver|provider)\b([^>]*?)(\/>|>([\s\S]*?)<\/\1>)/g)) {
+				const [, kind, attrs, , body = ''] = c;
+				if (!/android:exported\s*=\s*"true"/.test(attrs) || /android:(permission|readPermission|writePermission)\s*=/.test(attrs)) continue;
+				if (/android\.intent\.category\.LAUNCHER/.test(body)) continue;
+				const name = /android:name\s*=\s*"([^"]+)"/.exec(attrs)?.[1] ?? kind;
+				const link = /android\.intent\.category\.BROWSABLE/.test(body);
+				hit(c.index!, link
+					? { rule: 'android-deep-link', title: `${name} opens from any link`, severity: 'low', cwe: 'CWE-939', owasp: 'A01',
+						why: 'Any web page or app can open this screen with data of its choosing; code that trusts the link\'s parameters (an id, a URL to load, an action) can be steered.', fix: 'Treat every deep-link parameter as untrusted: validate it, never load arbitrary URLs from it, and confirm actions with the user. Prefer verified App Links.' }
+					: { rule: 'android-exported', title: `${name} can be started by any app`, severity: kind === 'provider' ? 'high' : 'medium', cwe: 'CWE-926', owasp: 'A01',
+						why: `This ${kind} is exported with no permission, so any app on the phone can start it${kind === 'provider' ? ' and read or change its data' : ' and pass it data'}.`, fix: 'Set android:exported="false" if only your app uses it; otherwise require a permission (signature level for your own apps) and validate what it receives.' });
+			}
+		}
+		if (/(^|\/)network_security_config\.xml$/.test(file)) {
+			const m = /cleartextTrafficPermitted\s*=\s*"true"/.exec(text);
+			if (m) hit(m.index, { rule: 'android-cleartext', title: 'Network config allows plain HTTP', severity: 'medium', cwe: 'CWE-319', owasp: 'A02',
+				why: 'Traffic over plain HTTP can be read and changed by anyone on the same network.', fix: 'Allow cleartext only for a named dev domain, never in base-config.' });
+			const u = /<certificates\s+src\s*=\s*"user"/.exec(text);
+			if (u) hit(u.index, { rule: 'android-user-certs', title: 'App trusts certificates the user installs', severity: 'medium', cwe: 'CWE-295', owasp: 'A02',
+				why: 'Any certificate installed on the phone (by a user, malware or an MDM) can read the app\'s HTTPS traffic.', fix: 'Trust user certificates only inside <debug-overrides>.' });
+		}
+		if (/(^|\/)Info\.plist$/.test(file)) {
+			let m = /<key>NSAllowsArbitraryLoads<\/key>\s*<true\s*\/>/.exec(text);
+			if (m) hit(m.index, { rule: 'ios-ats-off', title: 'App Transport Security is off', severity: 'medium', cwe: 'CWE-319', owasp: 'A02',
+				why: 'NSAllowsArbitraryLoads lets the app load anything over plain HTTP or weak TLS, so traffic can be read and changed on the network.', fix: 'Remove it; add a narrow NSExceptionDomains entry for the one host that needs it.' });
+			m = /<key>NSExceptionAllowsInsecureHTTPLoads<\/key>\s*<true\s*\/>/.exec(text);
+			if (m) hit(m.index, { rule: 'ios-ats-exception', title: 'A domain is allowed over plain HTTP', severity: 'low', cwe: 'CWE-319', owasp: 'A02',
+				why: 'Traffic to this domain is not encrypted.', fix: 'Serve that host over HTTPS and remove the exception.' });
+		}
 	}
 	return out;
 }

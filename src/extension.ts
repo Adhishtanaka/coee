@@ -109,7 +109,8 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('coee.architecture', safe(async (arg?: unknown, focus?: unknown) => architecture.open(await dirOf(arg) ?? (arg instanceof vscode.Uri ? vscode.workspace.getWorkspaceFolder(arg)?.uri : undefined), false, typeof focus === 'string' ? focus : undefined))),
 		// The page switcher on every coee page.
 		vscode.commands.registerCommand('coee.go', safe(async (to?: unknown, root?: unknown) => {
-			const r = root instanceof vscode.Uri ? root : undefined;
+			// A file walkthrough passes its file: every page works on the project holding it (git can't run in a file: ENOTDIR).
+			const r = root instanceof vscode.Uri ? await folderOf(root) ?? vscode.workspace.getWorkspaceFolder(root)?.uri ?? vscode.Uri.joinPath(root, '..') : undefined;
 			switch (to) {
 				case 'architecture': return architecture.open(r);
 				case 'changes': return vscode.commands.executeCommand('coee.changes', r);

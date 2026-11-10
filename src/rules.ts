@@ -45,8 +45,8 @@ export interface RuleHit {
 const ANY = /./;
 const JS = /\.(m?[jt]sx?|cjs|vue|svelte|html?)$/i;
 const PY = /\.py$/i;
-const C = /\.(c|h|cc|cpp|cxx|hpp|hh)$/i;
-const CODE = /\.(m?[jt]sx?|cjs|vue|svelte|py|rb|php|go|java|kt|cs|rs|scala|swift|c|h|cc|cpp|hpp)$/i;
+const C = /\.(c|h|cc|cpp|cxx|hpp|hh|m|mm)$/i; // Objective-C is C underneath: the same unsafe calls
+const CODE = /\.(m?[jt]sx?|cjs|vue|svelte|py|rb|php|go|java|kt|cs|rs|scala|swift|c|h|cc|cpp|hpp|m|mm)$/i;
 
 /** Bits per character: random keys score high, words and placeholders low. */
 export function entropy(s: string): number {
@@ -132,7 +132,7 @@ export const RULES: Rule[] = [
 		why: 'Unpickling runs code chosen by whoever wrote the data.', fix: 'Use JSON for data from outside; only unpickle what you created and signed.' },
 	{ id: 'py-yaml', title: 'yaml.load without SafeLoader', severity: 'high', cwe: 'CWE-502', owasp: 'A08', files: PY, pattern: /\byaml\.(load|load_all)\s*\((?![^)]*SafeLoader)/,
 		why: 'The full loader can build arbitrary Python objects, which runs code.', fix: 'Use yaml.safe_load.' },
-	{ id: 'unsafe-deserialize', title: 'Native deserialization of input', severity: 'high', cwe: 'CWE-502', owasp: 'A08', files: /\.(php|java|kt|cs|rb)$/i, pattern: /\bunserialize\s*\(|new\s+ObjectInputStream\s*\(|BinaryFormatter|Marshal\.load\s*\(/,
+	{ id: 'unsafe-deserialize', title: 'Native deserialization of input', severity: 'high', cwe: 'CWE-502', owasp: 'A08', files: /\.(php|java|kt|cs|rb|m|mm|swift)$/i, pattern: /\bunserialize\s*\(|new\s+ObjectInputStream\s*\(|BinaryFormatter|Marshal\.load\s*\(|\bunarchiveObjectWithData\b|\bunarchiveTopLevelObjectWithData\b|NSKeyedUnarchiver\.unarchiveObject\b/,
 		why: 'These formats can create any object, and gadget chains turn that into code execution.', fix: 'Use JSON and validate the shape.' },
 
 	// --- Memory safety
@@ -155,8 +155,18 @@ export const RULES: Rule[] = [
 
 	// --- Configuration and auth
 	{ id: 'tls-off', title: 'TLS certificate checks turned off', severity: 'high', cwe: 'CWE-295', owasp: 'A02', files: CODE,
-		pattern: /rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED[^\n]*["']?0|\bverify\s*=\s*False|InsecureSkipVerify\s*:\s*true|CURLOPT_SSL_VERIFYPEER\s*,\s*(false|0)/,
+		pattern: /rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED[^\n]*["']?0|\bverify\s*=\s*False|InsecureSkipVerify\s*:\s*true|CURLOPT_SSL_VERIFYPEER\s*,\s*(false|0)|allowInvalidCertificates\s*=\s*(YES|true)|setAllowsAnyHTTPSCertificate|onReceivedSslError[\s\S]{0,120}\.proceed\s*\(/,
 		why: 'Without the check anyone on the network path can pose as the server and read or change the traffic.', fix: 'Keep verification on; for a private CA, pass its certificate instead.' },
+	// --- Mobile apps (iOS, Android)
+	{ id: 'mobile-insecure-storage', title: 'Secret kept in plain app settings', severity: 'medium', cwe: 'CWE-312', owasp: 'A02', files: CODE,
+		pattern: /(NSUserDefaults|UserDefaults\.standard|\bdefaults\b|getSharedPreferences|SharedPreferences|prefs)\b[^\n]*\b(set\w*|put\w*|edit)\b[^\n]*(password|passwd|token|secret|apiKey|api_key|pin\b)/i,
+		why: 'UserDefaults and SharedPreferences are plain files: anyone with a backup, a rooted or jailbroken phone, or a file-reading bug can read the secret.', fix: 'Keep secrets in the Keychain (iOS) or EncryptedSharedPreferences / the Android Keystore.' },
+	{ id: 'keychain-always', title: 'Keychain item readable while the phone is locked', severity: 'medium', cwe: 'CWE-311', owasp: 'A02', files: CODE,
+		pattern: /kSecAttrAccessibleAlways(ThisDeviceOnly)?\b/,
+		why: 'kSecAttrAccessibleAlways keeps the item readable even when the device is locked, so a stolen phone gives it up.', fix: 'Use kSecAttrAccessibleWhenUnlockedThisDeviceOnly (or AfterFirstUnlock for background work).' },
+	{ id: 'webview-js-bridge', title: 'Web page can call into app code', severity: 'medium', cwe: 'CWE-749', owasp: 'A03', files: CODE,
+		pattern: /\baddJavascriptInterface\s*\(|\bsetAllowUniversalAccessFromFileURLs\s*\(\s*true|\bUIWebView\b/,
+		why: 'Any script that gets into the web view (an ad, a hijacked page) can call the exposed app methods, or read local files.', fix: 'Load only your own pages, expose as little as possible, and use WKWebView with a message handler that checks the origin.' },
 	{ id: 'cors-any', title: 'CORS open to every site', severity: 'medium', cwe: 'CWE-942', owasp: 'A05', files: CODE,
 		pattern: /Access-Control-Allow-Origin["']?\s*[,:]\s*["']\*["']|\borigin\s*:\s*(["']\*["']|true\b)/,
 		why: 'Any website can call this API from a visitor\'s browser and read the answers.', fix: 'List the origins that may call it.' },

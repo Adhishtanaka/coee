@@ -401,7 +401,7 @@ function render() {
   if (!map) { root.replaceChildren(bar, el('div', { className: 'wrap' }, el('span'), st.error ? el('p', { className: 'error' }, st.error) : reading(st.reading || 'the project'))); return; }
   const subs = st.subsystems, F = st.facts;
   const toc = el('nav', { className: 'toc' }, ...(subs ? [['overview', 'Overview'], ['ask', 'Find'], ['how', 'How it works'], ['arch', 'Architecture'], ['packages', 'Packages'], ['conv', 'Conventions']]
-    : [['overview', 'Overview'], ['ask', 'Find'], ['how', 'How it works'], ['entry', 'Where it starts'], ['arch', 'Architecture'], ['parts', 'Components'], ['api', 'API'], ['uses', 'Use cases'], ['rules', 'Business rules'], ['data', 'Data'], ['states', 'States'], ['conv', 'Conventions']])
+    : [['overview', 'Overview'], ['ask', 'Find'], ['how', 'How it works'], ['entry', 'Where it starts'], ['arch', 'Architecture'], ['parts', 'Components'], ...(F && F.routes.length ? [['api', 'API']] : []), ...(F && F.events && F.events.length ? [['events', 'UI & events']] : []), ['uses', 'Use cases'], ['rules', 'Business rules'], ['data', 'Data'], ['states', 'States'], ['conv', 'Conventions']])
     .map(([id, label]) => el('button', { className: 'link', onclick: () => go(id) }, label)));
   const a = st.answer;
   const askBox = el('form', { className: 'ask', onsubmit: e => { e.preventDefault(); const q = e.target.q.value.trim(); if (q) send('ask', { q }); } },
@@ -441,9 +441,10 @@ function render() {
         const out = map.connections.filter(e => e.from === c.id), inc = map.connections.filter(e => e.to === c.id);
         const card = el('div', { className: 'card', id: 'c-' + c.id }, el('h3', {}, c.name),
           el('p', {}, (d && d.role) || c.description || c.summary),
-          F ? (() => { const n = (list) => list.filter(x => x.part === c.id).length, r = n(F.routes), ru = n(F.rules), dt = n(F.dtos.filter(x => x.kind !== 'object')), en = F.entries.some(e => c.files.some(f => f.path === e.file));
-            return r || ru || dt || en ? el('div', { className: 'cchips' }, en ? el('button', { className: 'cchip', onclick: () => go('entry') }, 'entry point') : null,
+          F ? (() => { const n = (list) => list.filter(x => x.part === c.id).length, r = n(F.routes), ev = n(F.events || []), ru = n(F.rules), dt = n(F.dtos.filter(x => x.kind !== 'object')), en = F.entries.some(e => c.files.some(f => f.path === e.file));
+            return r || ev || ru || dt || en ? el('div', { className: 'cchips' }, en ? el('button', { className: 'cchip', onclick: () => go('entry') }, 'entry point') : null,
               r ? el('button', { className: 'cchip', onclick: () => go('api') }, r + ' route' + (r === 1 ? '' : 's')) : null,
+              ev ? el('button', { className: 'cchip', onclick: () => go('events') }, ev + ' event' + (ev === 1 ? '' : 's')) : null,
               ru ? el('button', { className: 'cchip', onclick: () => go('rules') }, ru + ' rule' + (ru === 1 ? '' : 's')) : null,
               dt ? el('button', { className: 'cchip', onclick: () => go('data') }, dt + ' data shape' + (dt === 1 ? '' : 's')) : null) : null; })() : null,
           (d && d.keyFiles.length ? d.keyFiles : c.files.slice(0, 3)).length ? el('div', { className: 'files' }, ...(d && d.keyFiles.length ? d.keyFiles : c.files.slice(0, 3)).map(fileLink)) : null,
@@ -460,6 +461,14 @@ function render() {
           el('td', {}, fileLink({ path: r.file, startLine: r.line, why: r.handler || '' }), r.handler ? el('div', { className: 'muted mono' }, r.handler + '()') : null),
           el('td', {}, ...(r.uses.length ? r.uses.map(u => el('button', { className: 'link mono', onclick: () => go('d-' + u) }, u + ' ')) : [el('span', { className: 'muted' }, '–')])),
           el('td', {}, r.guards.length ? el('ul', { className: 'guards' }, ...r.guards.slice(0, 4).map(g => { const p = (F.rules.find(x => x.text === g) || {}).plain; return el('li', { className: p ? 'plain' : '' }, p || (g.length > 90 ? g.slice(0, 89) + '…' : g)); })) : el('span', { className: 'muted' }, 'none found')))))))) : null,
+    !subs && F && F.events && F.events.length ? el('section', { id: 'events' }, el('h2', {}, 'UI & events'),
+      el('p', { className: 'muted' }, 'What the program reacts to: clicks, taps, keys, listeners, commands and timers, and where each is handled.'),
+      el('div', { className: 'tablewrap' }, el('table', { className: 'facts' },
+        el('thead', {}, el('tr', {}, ...['Event', 'Where', 'In'].map(h => el('th', {}, h)))),
+        el('tbody', {}, ...F.events.map(e => el('tr', {},
+          el('td', {}, el('code', {}, e.on)),
+          el('td', {}, fileLink({ path: e.file, startLine: e.line, why: '' })),
+          el('td', {}, e.handlerFile ? el('span', {}, el('span', { className: 'mono' }, e.handler + '() '), fileLink({ path: e.handlerFile, startLine: e.handlerLine, why: e.handler + '()' })) : e.handler ? el('span', { className: 'mono' }, e.handler) : el('span', { className: 'muted' }, '–')))))))) : null,
     subs ? null : el('section', { id: 'uses' }, el('h2', {}, 'Use cases'),
       behavior ? el('p', { className: 'muted' }, 'What people do with it, and how each one flows through the code.') : reading(st.reading === 'use cases and lifecycles' ? 'use cases' : 'use cases (after how it works)'),
       ...(behavior ? behavior.useCases.map((u, k) => el('div', { className: 'uc', id: 'uc-' + k },

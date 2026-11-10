@@ -43,7 +43,7 @@ function declared(read: (p: string) => string | undefined): string[] {
 	return out;
 }
 
-const MANIFESTS = ['package.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'setup.py', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'composer.json', 'Gemfile'];
+const MANIFESTS = ['package.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'setup.py', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'composer.json', 'Gemfile', 'pubspec.yaml', 'Package.swift'];
 
 /**
  * The subsystems of a repository from its file list (relative paths) and a way to read small files.

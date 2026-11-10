@@ -16,6 +16,7 @@
     "a08-integrity.js": ["prototype-pollution", "dynamic-require"],
     "page.html": ["script-no-integrity"],
     "a09-logging.js": ["log-secret", "log-injection", "empty-catch"],
-    "a10-ssrf.js": ["ssrf", "ssrf-variable"]
+    "a10-ssrf.js": ["ssrf", "ssrf-variable"],
+    "mobile.m": ["mobile-insecure-storage", "unsafe-deserialize", "keychain-always", "c-strcpy"]
   }
 }

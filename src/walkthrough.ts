@@ -9,7 +9,7 @@ import { Lm, Prompt, isCancel, log } from './lm';
 import { diagramSvg } from './layout';
 import { MANIFEST, MapController, pickProject, read, sourceFiles } from './map';
 import { sampleTree } from './subsystems';
-import { SymbolSpan, planSteps, snapRange } from './steps';
+import { SymbolSpan, anchorKeys, planSteps, snapRange } from './steps';
 import { indexProject } from './codeindex';
 import { codeColumn, createPanel, page } from './ui';
 import { addCode, fileText } from './apply';
@@ -228,7 +228,7 @@ export class WalkthroughController implements vscode.Disposable {
 			case 'start': this.set({ intro: false }); return this.showScene();
 			case 'startNow': this.stopReading(); this.set({ intro: false }); return this.showScene();
 			case 'intro': return this.set({ intro: true });
-			case 'openPlan': return this.openPlan(this.session?.uri);
+			case 'openPlan': return vscode.commands.executeCommand('coee.go', 'plan', this.session?.uri); // a file walkthrough's uri → its project
 			case 'ask': return this.ask(String(m.text ?? '').trim());
 			case 'cancel': return this.cancel();
 			case 'stopReading': return this.stopReading();
@@ -343,19 +343,21 @@ export class WalkthroughController implements vscode.Disposable {
 		const kindOf = (k: vscode.SymbolKind): SymbolSpan['kind'] | undefined => k === vscode.SymbolKind.Function ? 'function'
 			: k === vscode.SymbolKind.Method || k === vscode.SymbolKind.Constructor ? 'method'
 			: [vscode.SymbolKind.Class, vscode.SymbolKind.Interface, vscode.SymbolKind.Struct, vscode.SymbolKind.Enum].includes(k) ? 'class' : undefined;
-		const fileText = doc.getText(), rel = vscode.workspace.asRelativePath(doc.uri);
+		const fileText = doc.getText(), rel = vscode.workspace.asRelativePath(doc.uri), fileLines = fileText.split('\n');
 		// The language server's ranges are exact (planSteps prefers them); its pseudo-symbols like "createServer() callback" are dropped there.
 		const symbolsAll: SymbolSpan[] = flat.flatMap(x => { const kind = kindOf(x.kind); return kind ? [{ name: x.name, kind, line: x.range.start.line + 1, end: x.range.end.line + 1 }] : []; });
 		const jobs: Job[] = parts.map((base, k) => {
 			const steps = testFile ? [] : planSteps(rel, fileText, base.startLine, endLine(base), { firstPart: k === 0, lastPart: k === n - 1, symbols: symbolsAll });
 			return {
 				where: { startLine: base.startLine, endLine: endLine(base), what: `lines ${base.startLine}–${endLine(base)}` },
-				run: earlier => this.cached({ explain: base, earlier, v: steps.length ? 'steps2' : undefined, steps, audience: vscode.workspace.getConfiguration('coee').get('audience', 'beginner') }, () => {
+				run: earlier => this.cached({ explain: base, earlier, v: steps.length ? 'steps3' : 'scenes2', steps, audience: vscode.workspace.getConfiguration('coee').get('audience', 'beginner') }, () => {
 					const ctx: CodeContext = base.part ? { ...base, part: { ...base.part, earlier } } : base;
 					// No functions in these lines (a config, a script body): the model picks the scenes as before.
-					if (!steps.length) return this.reader.json<Walkthrough>(b => buildExplainPrompt(ctx, b), d => repair(d, ctx.startLine, endLine(ctx)));
+					// Key lines are placed by the code they quote, so a line number one off never marks the wrong statement.
+					const anchored = (w: Walkthrough): Walkthrough => ({ ...w, scenes: w.scenes.map(s => { const keyLines = s.keyLines && anchorKeys(fileLines, s.startLine, s.endLine, s.keyLines); return keyLines?.length ? { ...s, keyLines } : { ...s, keyLines: undefined }; }) });
+					if (!steps.length) return this.reader.json<Walkthrough>(b => buildExplainPrompt(ctx, b), d => repair(d, ctx.startLine, endLine(ctx))).then(anchored);
 					const audience = vscode.workspace.getConfiguration('coee').get<string>('audience', 'beginner') === 'experienced' ? 'experienced' : 'beginner';
-					return this.reader.json<Walkthrough>(b => buildStepsPrompt(ctx, steps, b, audience), d => repairSteps(d, steps));
+					return this.reader.json<Walkthrough>(b => buildStepsPrompt(ctx, steps, b, audience), d => repairSteps(d, steps)).then(anchored);
 				}),
 			};
 		});

@@ -8,8 +8,9 @@ import { sampleTree } from './subsystems';
 
 const KEY = 'coee.systemMap';
 export const EXCLUDE = '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**,**/vendor/**,**/target/**,**/.venv/**,**/venv/**,**/__pycache__/**,**/*.min.*,**/*.map,**/*.lock,**/package-lock.json,**/.vscode-test/**}';
-export const SOURCE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|rb|php|cs|c|h|cc|cpp|hpp|scala|dart|vue|svelte|ex|exs|lua|sh|sql)$/i;
-export const MANIFEST = /(^|\/)(package\.json|pyproject\.toml|go\.mod|Cargo\.toml|README\.md|requirements\.txt|Dockerfile|docker-compose\.ya?ml)$/i;
+import { SOURCE } from './codeindex';
+export { SOURCE };
+export const MANIFEST = /(^|\/)(package\.json|pyproject\.toml|go\.mod|Cargo\.toml|README\.md|requirements\.txt|Dockerfile|docker-compose\.ya?ml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|libs\.versions\.toml|pom\.xml|Podfile|Package\.swift|pubspec\.yaml|AndroidManifest\.xml|Info\.plist|[\w.-]+\.csproj)$/i;
 // ponytail: one pass sized to the model (lm.ts fits it); big repos get a subsystem level first (architecture.ts), so this maps one package at a time
 const MAX_TREE = 800, MAX_EXCERPTS = 150;
 

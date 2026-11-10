@@ -14,8 +14,8 @@ import { digest, readFiles } from './walkthrough';
 import { createPanel, page, showLines } from './ui';
 import { addCode, fileText, fixSnippet } from './apply';
 import { indexProject } from './codeindex';
-import { designChecks, projectFacts } from './facts';
-import { INPUT_DRIVEN, TraceStep, proofCommand, proofPath, traceAttack } from './proof';
+import { appConfigChecks, designChecks, projectFacts } from './facts';
+import { INPUT_DRIVEN, TraceStep, fitProof, proofCommand, proofPath, traceAttack } from './proof';
 
 const CACHE_KEY = 'coee.security';
 const DISMISS_KEY = 'coee.security.dismissed';
@@ -24,7 +24,7 @@ const VERSION = 2; // bump when what a saved scan holds changes (2: rules, depen
 const SCAN_CHARS = 600_000; // code read per scan
 const BATCH_CHARS = 40_000; // code per request; ponytail: sized for small context windows, bigger batches if scans are slow
 // Config and markup hold secrets and unsafe settings too; the other features don't read them.
-const EXTRA = /\.(json|ya?ml|toml|ini|conf|properties|env|html?)$|(^|\/)\.env[\w.]*$/i;
+const EXTRA = /\.(json|ya?ml|toml|ini|conf|properties|env|html?|gradle|kts|plist)$|(^|\/)\.env[\w.]*$|(^|\/)(pom\.xml|pubspec\.lock|Package\.resolved|AndroidManifest\.xml|network_security_config\.xml)$/i;
 
 interface PageState {
 	title?: string;
@@ -200,7 +200,8 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 				// on login, no security headers). Both go to the model to confirm or reject.
 				const fx = new Map(files.map(f => [f.path, f.text]));
 				const design: HitRef[] = isFile ? [] : designChecks(projectFacts(indexProject(files), fx), fx).map(d => ({ ...d, id: `${d.rule}:${d.file}:${d.line}` }));
-				const hits: HitRef[] = [...files.flatMap(f => scanText(f.path, f.text)), ...design];
+				const config: HitRef[] = appConfigChecks(fx).map(d => ({ ...d, id: `${d.rule}:${d.file}:${d.line}` })); // a file scan of AndroidManifest.xml too
+				const hits: HitRef[] = [...files.flatMap(f => scanText(f.path, f.text)), ...design, ...config];
 				const ruleOnly: SecurityReport = { summary: '', findings: hits.map(ruleFinding) };
 				this.show({ report: mergeReports([ruleOnly]), reading: 'dependencies' });
 				// 2. Dependencies (a project or folder scan only).
@@ -208,11 +209,18 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 				if (!isFile) {
 					const dir = path.join(root.fsPath, rel);
 					const read = (p: string) => fileText(vscode.Uri.file(path.join(dir, p)));
-					const audit = await auditDependencies(dir, read, vscode.workspace.isTrusted).catch(() => ({ issues: [], how: [] }));
+					const under = all.map(p => rel ? p.slice(rel.length + 1) : p);
+					const audit = await auditDependencies(dir, read, vscode.workspace.isTrusted, under).catch(() => ({ issues: [], how: [] }));
 					const manifest = await read('package.json') ?? '';
-					const lineOf = (name: string) => Math.max(1, manifest.split('\n').findIndex(l => l.includes(`"${name}"`)) + 1);
+					// The line that declares it: "name" in package.json; the artifact (okhttp of com.squareup.okhttp3:okhttp), the
+					// package or the repository elsewhere.
+					const texts = new Map<string, string>();
+					for (const d of audit.issues) if (d.file !== 'package-lock.json' && !texts.has(d.file)) texts.set(d.file, await read(d.file) ?? '');
+					const lineOf = (text: string, needle: string) => Math.max(1, text.split('\n').findIndex(l => l.includes(needle)) + 1);
 					how = audit.how;
-					deps = audit.issues.map(d => depFinding({ ...d, file: path.posix.join(rel, manifest && d.file === 'package-lock.json' ? 'package.json' : d.file) }, d.file === 'package-lock.json' ? lineOf(d.name) : 1));
+					deps = audit.issues.map(d => d.file === 'package-lock.json'
+						? depFinding({ ...d, file: path.posix.join(rel, manifest ? 'package.json' : d.file) }, manifest ? lineOf(manifest, `"${d.name}"`) : 1)
+						: depFinding({ ...d, file: path.posix.join(rel, d.file) }, lineOf(texts.get(d.file) ?? '', d.name.split(/[:/]/).pop()!)));
 				}
 				if (gen !== this.gen) throw new Error('cancelled');
 				// 3. The model, batch by batch, with that batch's rule hits to confirm or reject.
@@ -339,11 +347,14 @@ export class SecurityController implements vscode.Disposable, vscode.CodeActionP
 		if (!f?.testCode || !root) return;
 		if (!vscode.workspace.isTrusted) { vscode.window.showWarningMessage('coee runs proof tests only in a trusted workspace.'); return; }
 		const file = proofPath(f.file, f.id);
-		const sn: Snippet = { file, mode: 'new', code: f.testCode };
+		const sn: Snippet = { file, mode: 'new', code: fitProof(file, f.testCode) };
 		const existing = await fileText(vscode.Uri.joinPath(root, file));
 		if (existing === undefined && !await addCode(root, sn, 'the proof test')) return;
-		const manifest = await fileText(vscode.Uri.joinPath(root, 'package.json'));
-		const run = proofCommand(file, manifest, p => !!vscode.workspace.textDocuments.find(d => d.uri.path.endsWith('/' + p)));
+		const manifest = await fileText(vscode.Uri.joinPath(root, /\.dart$/.test(file) ? (file.match(/^(.*\/)?test\//)?.[1] ?? '') + 'pubspec.yaml' : 'package.json'));
+		// What the project has at its root decides the runner (gradlew, pom.xml, Package.swift, jest.config…).
+		const MARKERS = ['gradlew', 'gradlew.bat', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'pom.xml', 'Package.swift', 'jest.config.js', 'jest.config.ts'];
+		const present = new Set((await Promise.all(MARKERS.map(async m => (await vscode.workspace.fs.stat(vscode.Uri.joinPath(root, m)).then(() => m, () => undefined))))).filter(Boolean));
+		const run = proofCommand(file, manifest, p => present.has(p));
 		if (!run) { vscode.window.showWarningMessage(`coee doesn't know how to run ${file}. Run it with your test runner.`); return; }
 		const shown = [run.command, ...run.args].join(' ');
 		const ok = await vscode.window.showWarningMessage(`Run the proof test for "${f.title}"?`, { modal: true, detail: `coee will run this in a terminal, in ${path.basename(root.path)}:\n\n${shown}\n\nThe test attacks your code locally, in-process. It doesn't contact any server.` }, 'Run');

@@ -33,7 +33,7 @@ export interface Scene {
 	calls?: string[];
 	calledBy?: string[];
 	/** The 1-3 lines that matter most in this step, each with what it does: highlighted more strongly than the rest. */
-	keyLines?: Array<{ line: number; note: string }>;
+	keyLines?: Array<{ line: number; note: string; code?: string }>;
 }
 
 /**
@@ -142,6 +142,7 @@ Writing rules:
 - Never walk line by line or list what each statement does. Use the same names in text, diagrams and code.
 - Be concrete: name the real files, functions, commands and data of THIS code. Never write a sentence that could describe any project ("understanding code can be challenging", "this improves the user experience", "handles errors gracefully").
 - Ground every claim in the code shown; if something isn't shown, say what it probably does and that it's not shown.
+- Use the terms of the kind of code it is: for a server, the request and the reply; for a UI (web, mobile or desktop), what the user sees and does, the handler that runs, the state it changes and how the screen updates; for a CLI, the arguments and the output; for a game, job or listener, the loop or event that drives it.
 For a reader who knows some programming but not much:
 - "learn": 2-4 things they will understand by the end, as outcomes ("How each request is counted per IP address").
 - "terms": 3-8 words from this code or its domain that a junior may not know (e.g. middleware, token bucket, debounce, ORM), each with a plain meaning under 20 words. Use the same spelling in the text.`;
@@ -183,7 +184,7 @@ const DIAGRAM_RULES = `Diagrams: add one only when a picture makes the idea clic
 A walkthrough of 4+ scenes usually has 1-3 diagrams, mostly on "Underlying concept", "How it works" and "Big picture" scenes.
 Like a whiteboard sketch: 3-7 nodes, each with a short "label" (a real name from the code, e.g. "rateLimit middleware") and a 2-5 word "detail" ("per-IP counter"). Set "focus" to the id of the node this scene is about. Add a one-line "caption". Set "illustrative": true when it shows a model of the idea rather than code exactly as written.`;
 const DIAGRAM_SCHEMA = `"diagram"?: {"kind": "flow"|"sequence"|"state", "nodes": [{"id": string, "label": string, "detail"?: string}], "edges": [{"from": id, "to": id, "label"?: string, "reply"?: boolean}], "focus"?: id, "caption"?: string, "illustrative"?: boolean}`;
-const SCENE_SCHEMA = (file: boolean) => `{"label": string, "title": string (the takeaway, a short sentence),${file ? ' "file": string,' : ''} "startLine": number, "endLine": number (whole functions: from a function's first line to its last), "text": string (50-110 words; \`code\` spans allowed), "keyLines"?: [{"line": number, "note": string}] (the 1-3 lines the text is about, with what each does in under 12 words), ${DIAGRAM_SCHEMA}}`;
+const SCENE_SCHEMA = (file: boolean) => `{"label": string, "title": string (the takeaway, a short sentence),${file ? ' "file": string,' : ''} "startLine": number, "endLine": number (whole functions: from a function's first line to its last), "text": string (50-110 words; \`code\` spans allowed), "keyLines"?: [{"line": number, "code": string, "note": string}] (the 1-3 lines the text is about: "code" is that line copied exactly, "note" what it does in under 12 words), ${DIAGRAM_SCHEMA}}`;
 const LEARNING_SCHEMA = `"learn": [string], "terms": [{"name": string, "meaning": string}]`;
 
 function surroundings(ctx: CodeContext, room: number): string {
@@ -222,16 +223,24 @@ function fileTask(ctx: CodeContext): string {
 const BEGINNER = `The reader is new to programming, or new to this language. Write for them:
 - Plain everyday words. No jargon without saying what it means in the same sentence.
 - Say WHY before HOW: what problem this code solves for the program, in one sentence they could repeat.
-- Walk through ONE concrete example with real values ("say the request asks for todo 3: \`id\` is 3, so...").
+- Walk through ONE concrete example with real values, of the kind this code handles: a request ("say the request asks for todo 3: \`id\` is 3, so..."), a click or tap ("say you press Save with the title empty..."), a command, a message, a file.
 - The first time a step uses syntax a beginner may not know (an arrow function \`=>\`, \`async\`/\`await\`, destructuring \`{ a, b } = x\`, template strings, \`?.\`, \`??\`, list comprehensions, decorators, generics), explain it in half a sentence.
 - Short sentences. One idea per sentence.`;
 const EXPERIENCED = 'The reader is a working programmer. Skip what any programmer already knows (syntax, obvious names) and spend words on intent, data flow, and the non-obvious.';
+/** Not every program is a web API: say what kind of code this is in its own terms. */
+const CODE_KINDS = `Explain the code in the terms of what it is:
+- A web API or server: the request that comes in, what is checked, what is stored or called, and the reply.
+- A user interface (web, mobile, desktop: React, Vue, Flutter, Android, SwiftUI, Swing, JavaFX, Qt, WinForms...): what the user sees, what they do (click, type, tap), which handler runs, what state changes, and how the screen updates. Name the component or screen, its state and its props or inputs.
+- A command-line tool or script: the arguments it takes, what it does with them, and what it prints or writes.
+- A library: what a caller uses it for, and what each public function promises.
+- A game, a job, a worker or a listener: the loop or event that drives it, and what happens on each tick, job or message.`;
 
 export function buildStepsPrompt(ctx: CodeContext, steps: readonly Step[], budget = 1e9, audience: 'beginner' | 'experienced' = 'beginner'): string {
 	const list = steps.map(st => `${st.id} · ${st.label} · lines ${st.startLine}-${st.endLine}${st.signature ? ` · \`${st.signature.slice(0, 120)}\`` : ''}`
 		+ `${st.calls.length ? ` · calls ${st.calls.join(', ')}` : ''}${st.calledBy.length ? ` · called by ${st.calledBy.join(', ')}` : ''}${st.rules.length ? ` · has ${st.rules.length} rule${st.rules.length === 1 ? '' : 's'}` : ''}`).join('\n');
 	const head = `${ROLE}
 ${audience === 'beginner' ? BEGINNER : EXPERIENCED}
+${CODE_KINDS}
 
 Explain this ${ctx.lang} code from ${ctx.file} as a step-by-step walkthrough. The steps are already chosen: one per function, class or method, in the order the code runs. Write EVERY step below, in this order, using its id. Don't add, merge, skip or move steps.
 ${list}
@@ -239,7 +248,7 @@ ${list}
 For each step:
 - "title": what it does, in plain words, one short sentence (not just the name).
 - "text": 60-140 words. Why it exists, then how it works with one concrete example, naming the real variables and calls. Then the part that surprises people: an edge case, a trick, why it's written this way.
-- "keyLines": the 1-3 lines in this step that matter most (where the decision is made, the value is computed, the data is saved or sent), each {"line": its number as shown at the left, within the step's lines, "note": what that line does, under 12 words}. For "Start here": what this file is for, what it imports and keeps, and where execution enters. For "How it fits together": how the steps work together, as one story from where it starts to what it produces. For "Small helpers": one sentence per helper.
+- "keyLines": the 1-3 lines in this step that matter most (where the decision is made, the value is computed, the data is saved or sent), each {"line": its number as shown at the left, within the step's lines, "code": that line's code copied exactly (it is how the line is found, so copy it character for character), "note": what that line does, under 12 words}. For "Start here": what this file is for, what it imports and keeps, and where execution enters. For "How it fits together": how the steps work together, as one story from where it starts to what it produces. For "Small helpers": one sentence per helper.
 - "inputs": what it takes (parameters, and what each means), "output": what it returns or produces, "effects": state it changes, I/O, network, files, or other calls with consequences. Plain words, one line each; omit when there's nothing.
 - "rules": the business rules and guards inside it in plain words, one per item ("a title is required", "only the owner can cancel"); omit when there are none.
 - "diagram": only when a picture helps (a branchy flow, calls back and forth, a lifecycle).
@@ -247,7 +256,7 @@ ${surroundings(ctx, 1500)}
 ${DIAGRAM_RULES}
 
 Reply with ONLY JSON, no prose:
-{"title": string, "summary": string (one or two sentences: what this code is for), ${LEARNING_SCHEMA}, "steps": [{"id": string, "title": string, "text": string, "keyLines"?: [{"line": number, "note": string}], "inputs"?: string, "output"?: string, "effects"?: string, "rules"?: [string], ${DIAGRAM_SCHEMA}}]}
+{"title": string, "summary": string (one or two sentences: what this code is for), ${LEARNING_SCHEMA}, "steps": [{"id": string, "title": string, "text": string, "keyLines"?: [{"line": number, "code": string, "note": string}], "inputs"?: string, "output"?: string, "effects"?: string, "rules"?: [string], ${DIAGRAM_SCHEMA}}]}
 
 \`\`\``;
 	return `${head}
@@ -283,9 +292,9 @@ export function repairSteps(draft: any, steps: readonly Step[]): { value?: Walkt
 		const diagram = repairDiagram(x?.diagram ?? x?.mermaid);
 		if (diagram) scene.diagram = diagram;
 		// Key lines must sit inside the step: a number outside it would highlight the wrong code.
-		const keys = (Array.isArray(x?.keyLines) ? x.keyLines : []).map((k: any) => ({ line: int(k?.line), note: str(k?.note, 120) }))
-			.filter((k: { line: number; note: string }) => k.note && k.line >= st.startLine && k.line <= st.endLine)
-			.filter((k: { line: number }, i: number, a: Array<{ line: number }>) => a.findIndex(o => o.line === k.line) === i).slice(0, 3);
+		const keys = (Array.isArray(x?.keyLines) ? x.keyLines : []).map((k: any) => ({ line: int(k?.line), note: str(k?.note, 120), ...(str(k?.code, 300) ? { code: str(k?.code, 300) } : {}) }))
+			.filter((k: { line: number; note: string; code?: string }) => k.note && (k.code || k.line >= st.startLine && k.line <= st.endLine))
+			.filter((k: { line: number; code?: string }, i: number, a: Array<{ line: number; code?: string }>) => a.findIndex(o => o.line === k.line && o.code === k.code) === i).slice(0, 3);
 		if (keys.length) scene.keyLines = keys;
 		return scene;
 	});
@@ -686,7 +695,7 @@ export function repair(draft: any, first: number, last: number, files?: Record<s
 		if (Number.isNaN(a)) a = b;
 		if (Number.isNaN(b)) b = a;
 		const file = files ? resolvePath(str(s?.file, 300), known) : undefined;
-		const keyLines = (Array.isArray(s?.keyLines) ? s.keyLines : []).map((k: any) => ({ line: int(k?.line), note: str(k?.note, 120) })).filter((k: { line: number; note: string }) => k.line > 0 && k.note).slice(0, 4);
+		const keyLines = (Array.isArray(s?.keyLines) ? s.keyLines : []).map((k: any) => ({ line: int(k?.line), note: str(k?.note, 120), ...(str(k?.code, 300) ? { code: str(k?.code, 300) } : {}) })).filter((k: { line: number; note: string; code?: string }) => (k.line > 0 || k.code) && k.note).slice(0, 4);
 		return { title: str(s?.title, 200), label: str(s?.label, 30), text: str(s?.text ?? s?.explanation), file, startLine: a, endLine: b, diagram: repairDiagram(s?.diagram ?? s?.mermaid), snippets: repairSnippets(s?.snippets, known), keyLines };
 	}).filter(s => s.title && s.text && !Number.isNaN(s.startLine) && (!files || s.file));
 	// Models often renumber a slice from 1; shift back when that's clearly what happened.
@@ -703,7 +712,7 @@ export function repair(draft: any, first: number, last: number, files?: Record<s
 		if (s.file) scene.file = s.file;
 		if (s.diagram) scene.diagram = s.diagram;
 		if (s.snippets.length) scene.snippets = s.snippets;
-		const keys = s.keyLines.filter((k: { line: number }) => k.line >= scene.startLine && k.line <= scene.endLine);
+		const keys = s.keyLines.filter((k: { line: number; code?: string }) => k.code || k.line >= scene.startLine && k.line <= scene.endLine);
 		if (keys.length) scene.keyLines = keys;
 		return scene;
 	});
@@ -1314,6 +1323,7 @@ Then look for what patterns can't see, by following data from where it enters (r
 - missing or broken authentication and authorization: routes anyone can call, no ownership check on an id from the request (IDOR), privilege checks done only in the client
 - injection through variables and helpers (SQL, shell, eval, templates, HTML), server-side request forgery, open redirects, path traversal
 - mass assignment (the request body copied into a record), prototype pollution, race conditions, missing rate limits or size limits, unsafe uploads
+- in mobile and desktop apps, input also comes from other apps and the system: deep links and URL schemes, intents and their extras, exported activities, services, receivers and content providers, the clipboard, files shared in, push payloads, and pages loaded in web views. Look for that input reaching file paths, SQL, web views (loadUrl, evaluateJavascript, JavaScript bridges) or actions done without asking the user; secrets and tokens kept in plain storage (UserDefaults, SharedPreferences, plain files, logs) instead of the Keychain or Keystore; TLS weakened (trust-all certificates, hostname checks off, no pinning where the app clearly needs it); and sensitive data on screens that can be captured or cached
 - memory safety in C/C++/unsafe Rust: buffer and integer overflow, out-of-bounds, use after free, format strings
 - secrets in config, weak crypto, disabled TLS checks, insecure defaults, sensitive data in logs or error messages
 Go through every OWASP Top 10 (2021) category, and say nothing about the ones with no problem:
@@ -1327,7 +1337,7 @@ Rules:
 - "severity": critical (exploitable now, by anyone, with big impact: remote code execution, a leaked live secret), high, medium, low. "severityWhy": one sentence on why that level (who can reach it, what they gain).
 - "why": what is wrong and what it puts at risk. "exploit": how someone would actually abuse it, with an example request or input. "verify": how the reader can check it themselves (a request to send, a test to run).
 - "attack": a sequence diagram of the attack: nodes = "Attacker" first, then the entry point and the functions the data passes through by their real names, then the sink; edges = the steps, the first carrying the malicious input.
-- "fix": what to change, in plain words. "fixCode": the corrected code for exactly those lines, ready to paste, in the project's style. "testCode": a proof test: a COMPLETE test file that attacks the code in-process (call the function, or start the server on port 0 and send the malicious request) and asserts the code is safe, so it FAILS while the code is vulnerable and PASSES once fixed. It will be saved beside the vulnerable file, so import it by a relative path from there. Use the project's test framework (else the language's standard one: node:test, pytest, testing). Never touch the network outside localhost, real services, or files outside a temp folder.
+- "fix": what to change, in plain words. "fixCode": the corrected code for exactly those lines, ready to paste, in the project's style. "testCode": a proof test: a COMPLETE test file that attacks the code in-process (call the function, or start the server on port 0 and send the malicious request) and asserts the code is safe, so it FAILS while the code is vulnerable and PASSES once fixed. Where it is saved: beside the vulnerable file for JavaScript, TypeScript, Python and Go (import it by a relative path from there); for Kotlin and Java, in the same package under src/test (the mirror of src/main), so write the same package line and use JUnit; for Swift, in Tests/<Target>Tests of a Swift package, so use XCTest and \`@testable import <Target>\`; for Dart and Flutter, in test/ beside lib/, so import it as \`package:<name>/...\` and use package:test or flutter_test. Test the logic itself (the function, the parser, the URL handling), never through an emulator or a device. Use the project's test framework (else the language's standard one: node:test, pytest, testing, JUnit, XCTest, package:test). Never touch the network outside localhost, real services, or files outside a temp folder.
 - "owasp": the OWASP Top 10 2021 code ("A01" … "A10"), or "MEM" for memory safety. "cwe": e.g. "CWE-89".
 - "symbol": the exact text of the line where the problem starts, copied from the file; "startLine"/"endLine" use the line numbers shown.
 - At most 25 findings, most severe first. Merge repeats of the same problem into one finding that names the other places.
